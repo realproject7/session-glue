@@ -3,8 +3,8 @@ schema_version: 1
 session_id: 2026-06-30-1600-missing-head-commit
 session_date: 2026-06-30
 generated_at: 2026-06-30T16:00:00+09:00
-project_root: /Users/cho/Projects/roomme
-repo_root: /Users/cho/Projects/roomme
+project_root: /path/to/project
+repo_root: /path/to/project
 current_branch: main
 agent: codex
 status: in_progress
