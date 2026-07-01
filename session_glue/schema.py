@@ -65,8 +65,11 @@ RESUME_MECHANIC_PHRASES: tuple[str, ...] = (
     "read latest.md",
     "resume prompt",
     "inspect the handoff",
+    "inspect handoff",
+    "inspect latest",
     "verify that resume",
     "verify resume",
+    "check whether the new agent",
 )
 
 

@@ -75,6 +75,24 @@ The handoff is validated first: a missing required field or a resume-mechanic
 `next_todo_items[0]` is rejected before anything is written. `glue create` never
 accesses the network or the OS clipboard.
 
+### `glue validate`
+
+`glue validate` checks that an existing `.agent-history/` is internally
+consistent:
+
+```bash
+glue validate                              # validate ./.agent-history/
+glue validate --repo-root /path/to/project
+glue validate --sessions                   # also validate archived session files
+```
+
+It verifies that `LATEST.md` has valid frontmatter, that its `next_todo_items[0]`
+is a productive action (not a resume mechanic such as "paste the prompt" or
+"read `LATEST.md`"), that `RESUME_PROMPT.txt` exists, and that
+`INDEX.yaml.first_next_action` matches `LATEST.md`'s `next_todo_items[0]`. It
+exits non-zero and prints each problem when validation fails. Like the rest of
+the CLI, it never touches the network or an LLM.
+
 ## Development
 
 Implementation should follow the founding tickets in the proposal. Do not add daemons, background sync, retrieval services, or UI surfaces to the MVP unless the proposal is explicitly updated first.
