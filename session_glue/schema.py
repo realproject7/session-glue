@@ -42,6 +42,11 @@ REQUIRED_FIELDS: tuple[str, ...] = (
     "known_issues",
 )
 
+# Required fields whose value must be a YAML block sequence (a list).
+_LIST_FIELDS: frozenset[str] = frozenset(
+    {"active_context_files", "completed_tasks", "next_todo_items", "known_issues"}
+)
+
 # List-valued fields that are allowed to be present-but-empty. ``next_todo_items``
 # is deliberately excluded: it must contain at least a first productive action.
 _LIST_FIELDS_ALLOW_EMPTY: frozenset[str] = frozenset(
@@ -80,10 +85,20 @@ _INT_RE = re.compile(r"-?\d+$")
 
 
 def _parse_scalar(token: str) -> Any:
-    """Parse a single scalar value (quoted string, integer, or bare string)."""
+    """Parse a single scalar value (quoted string, integer, or bare string).
+
+    Double-quoted strings are unescaped so they round-trip with
+    :func:`_dump_scalar`, which escapes ``\\`` and ``"``. Single-quoted strings
+    are taken literally (the serializer only ever emits double quotes).
+    """
     token = token.strip()
     if len(token) >= 2 and token[0] in "\"'" and token[-1] == token[0]:
-        return token[1:-1]
+        inner = token[1:-1]
+        if token[0] == '"':
+            # Reverse _dump_scalar's escaping in a single left-to-right pass:
+            # ``\\`` -> ``\`` and ``\"`` -> ``"``.
+            inner = re.sub(r"\\(.)", lambda m: m.group(1), inner)
+        return inner
     if _INT_RE.match(token):
         return int(token)
     return token
@@ -280,8 +295,15 @@ class Handoff:
 
     @property
     def first_next_action(self) -> Any:
-        """The first productive action: ``next_todo_items[0]`` (or ``None``)."""
-        return self.next_todo_items[0] if self.next_todo_items else None
+        """The first productive action: ``next_todo_items[0]`` (or ``None``).
+
+        Guards against a scalar ``next_todo_items`` (e.g. a bare string), which
+        would otherwise yield its first *character* instead of ``None``.
+        """
+        items = self.next_todo_items
+        if isinstance(items, list) and items:
+            return items[0]
+        return None
 
     def validate(self) -> list[str]:
         """Return a list of validation errors; empty means the handoff is valid."""
@@ -291,9 +313,15 @@ class Handoff:
                 errors.append(f"missing required field: {name}")
                 continue
             value = getattr(self, name)
-            if name in _LIST_FIELDS_ALLOW_EMPTY:
-                continue  # present list may be empty
-            if value is None or (isinstance(value, (str, list)) and len(value) == 0):
+            if name in _LIST_FIELDS:
+                # Must be a block sequence, not a scalar. A scalar here would let
+                # ``next_todo_items[0]`` silently degrade to a single character.
+                if not isinstance(value, list):
+                    errors.append(f"required field must be a list: {name}")
+                elif name not in _LIST_FIELDS_ALLOW_EMPTY and len(value) == 0:
+                    errors.append(f"required field is empty: {name}")
+                continue
+            if value is None or (isinstance(value, str) and len(value) == 0):
                 errors.append(f"required field is empty: {name}")
 
         if "next_todo_items" in self.present_fields:

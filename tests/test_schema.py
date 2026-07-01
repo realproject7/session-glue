@@ -88,6 +88,25 @@ def test_invalid_next_action_fixture_reports_lint():
     assert any("resume mechanic" in e for e in errors)
 
 
+def test_scalar_list_field_fails_validation():
+    # A scalar where a block sequence is required must be rejected — otherwise a
+    # bare-string next_todo_items would validate and first_next_action would
+    # silently become the string's first character.
+    handoff = Handoff.from_frontmatter(
+        {name: "x" for name in REQUIRED_FIELDS}
+    )
+    errors = handoff.validate()
+    assert not handoff.is_valid()
+    assert any("must be a list: next_todo_items" in e for e in errors)
+    assert handoff.first_next_action is None
+
+
+def test_scalar_next_todo_items_first_action_is_none():
+    handoff = Handoff.from_frontmatter({"next_todo_items": "Add polling lifecycle"})
+    # Not indexing into the string: no silent "A".
+    assert handoff.first_next_action is None
+
+
 @pytest.mark.parametrize(
     "item",
     [
@@ -153,3 +172,19 @@ def test_dump_mapping_round_trips_scalars_and_sequences():
     frontmatter, _ = parse_frontmatter(_read("valid.md"))
     reparsed = parse_mapping(dump_mapping(frontmatter))
     assert reparsed == frontmatter
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        'label: "done"',  # colon forces quoting; embedded quotes must escape
+        r"a path with a backslash C:\Users\cho",
+        r'both \ and " together',
+        "trailing backslash \\",
+    ],
+)
+def test_dump_mapping_round_trips_escaped_scalars(value):
+    # Values that _dump_scalar escapes must survive a dump -> parse cycle
+    # unchanged (previously _parse_scalar stripped quotes without unescaping).
+    data = {"note": value}
+    assert parse_mapping(dump_mapping(data)) == data
