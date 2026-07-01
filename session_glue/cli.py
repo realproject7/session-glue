@@ -108,12 +108,16 @@ def _cmd_create(args: argparse.Namespace) -> int:
         print(f"glue create: repo root is not a directory: {repo_root}", file=sys.stderr)
         return 1
 
-    written = writer.create_handoff(
-        repo_root=repo_root,
-        frontmatter=frontmatter,
-        body=body,
-        handoff=handoff,
-    )
+    try:
+        written = writer.create_handoff(
+            repo_root=repo_root,
+            frontmatter=frontmatter,
+            body=body,
+            handoff=handoff,
+        )
+    except writer.HandoffWriteError as exc:
+        print(f"glue create: {exc}", file=sys.stderr)
+        return 1
     print("Wrote handoff for session " + str(handoff.session_id) + ":")
     for label in ("archive", "latest", "resume_prompt", "index"):
         print(f"  {label}: {written[label]}")

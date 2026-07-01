@@ -171,6 +171,49 @@ def test_traversal_session_id_stays_inside_sessions_dir(tmp_path):
     assert not (tmp_path.parent / "escape.md").exists()
 
 
+def _repo_and_outside(tmp_path: Path) -> tuple[Path, Path]:
+    repo = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    repo.mkdir()
+    outside.mkdir()
+    return repo, outside
+
+
+def _create_in(repo: Path, text: str) -> int:
+    src = repo / "handoff-in.md"
+    src.write_text(text, encoding="utf-8")
+    return main(["create", "--input", str(src), "--repo-root", str(repo)])
+
+
+def test_symlinked_agent_history_dir_is_rejected(tmp_path):
+    repo, outside = _repo_and_outside(tmp_path)
+    (repo / ".agent-history").symlink_to(outside, target_is_directory=True)
+    rc = _create_in(repo, VALID)
+    assert rc == 1
+    # Nothing was written through the symlink into the outside directory.
+    assert list(outside.iterdir()) == []
+
+
+def test_symlinked_sessions_dir_is_rejected(tmp_path):
+    repo, outside = _repo_and_outside(tmp_path)
+    (repo / ".agent-history").mkdir()
+    (repo / ".agent-history" / "sessions").symlink_to(outside, target_is_directory=True)
+    rc = _create_in(repo, VALID)
+    assert rc == 1
+    assert list(outside.iterdir()) == []
+
+
+def test_symlinked_output_file_is_rejected(tmp_path):
+    repo, outside = _repo_and_outside(tmp_path)
+    (repo / ".agent-history").mkdir()
+    evil = outside / "stolen.md"
+    (repo / ".agent-history" / "LATEST.md").symlink_to(evil)
+    rc = _create_in(repo, VALID)
+    assert rc == 1
+    # The symlink target outside the repo must not have been created/written.
+    assert not evil.exists()
+
+
 def test_create_reads_from_stdin(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO(VALID))
     rc = main(["create", "--repo-root", str(tmp_path)])

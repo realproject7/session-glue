@@ -35,6 +35,28 @@ INDEX_FILENAME = "INDEX.yaml"
 _UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
+class HandoffWriteError(Exception):
+    """Raised when a handoff cannot be written safely (e.g. a symlink escape)."""
+
+
+def _reject_symlink(path: Path) -> None:
+    """Refuse to follow a symlink at ``path``.
+
+    A pre-existing symlink at ``.agent-history``, ``sessions/``, or one of the
+    output files could redirect writes outside ``repo_root``. Issue #4 forbids
+    mutating files outside the current repo, so we reject rather than follow.
+    """
+    if path.is_symlink():
+        raise HandoffWriteError(f"refusing to write through a symlink: {path}")
+
+
+def _assert_within(path: Path, root_resolved: Path) -> None:
+    """Assert ``path`` resolves to a location inside ``root_resolved``."""
+    resolved = path.resolve()
+    if resolved != root_resolved and root_resolved not in resolved.parents:
+        raise HandoffWriteError(f"refusing to write outside the repo root: {path}")
+
+
 def slugify_session_name(session_id: str | None) -> str:
     """Turn a ``session_id`` into a safe single-path-segment archive base name.
 
@@ -110,22 +132,36 @@ def create_handoff(
     name = slugify_session_name(archive_name or handoff.session_id)
     archive_file = f"{SESSIONS_DIRNAME}/{name}.md"
 
-    history_dir = Path(repo_root) / AGENT_HISTORY_DIRNAME
+    root = Path(repo_root)
+    root_resolved = root.resolve()
+    history_dir = root / AGENT_HISTORY_DIRNAME
     sessions_dir = history_dir / SESSIONS_DIRNAME
+
+    archive_path = sessions_dir / f"{name}.md"
+    latest_path = history_dir / LATEST_FILENAME
+    resume_path = history_dir / RESUME_PROMPT_FILENAME
+    index_path = history_dir / INDEX_FILENAME
+
+    # Safety checks BEFORE creating directories or writing anything, so a
+    # rejected write leaves no partial state.
+    _reject_symlink(history_dir)
+    _reject_symlink(sessions_dir)
+    for path in (archive_path, latest_path, resume_path, index_path):
+        _reject_symlink(path)
+
     sessions_dir.mkdir(parents=True, exist_ok=True)
+
+    # After creating the dirs, confirm they resolve inside repo_root (catches a
+    # symlinked ancestor directory).
+    _assert_within(history_dir, root_resolved)
+    _assert_within(sessions_dir, root_resolved)
 
     document = render_document(frontmatter, body)
 
-    archive_path = sessions_dir / f"{name}.md"
     archive_path.write_text(document, encoding="utf-8")
-
-    latest_path = history_dir / LATEST_FILENAME
     latest_path.write_text(document, encoding="utf-8")
-
-    resume_path = history_dir / RESUME_PROMPT_FILENAME
     resume_path.write_text(build_resume_prompt(handoff), encoding="utf-8")
 
-    index_path = history_dir / INDEX_FILENAME
     existing_index: dict | None = None
     if index_path.exists():
         try:
