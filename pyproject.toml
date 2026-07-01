@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 # No required runtime dependencies in v1: the CLI is intentionally stdlib-only
-# so it can be trusted and installed immediately (see docs/PROPOSAL-session-glue.md §13.3).
+# so it can be trusted and installed immediately.
 dependencies = []
 
 [project.urls]

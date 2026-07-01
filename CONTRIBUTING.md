@@ -29,7 +29,7 @@ Before opening a PR:
 - keep scope tied to one issue when practical
 - update docs when behavior changes
 - check that new fixtures and examples contain no real credentials or private data
-- avoid adding daemons, MCP dependencies, embeddings, databases, watchers, product UI, telemetry, or cloud sync unless the proposal explicitly changes first
+- avoid adding daemons, MCP dependencies, embeddings, databases, watchers, product UI, telemetry, or cloud sync unless maintainers explicitly approve a scope change first
 
 ## Issues And Comments
 

@@ -16,4 +16,4 @@
 ## Scope Check
 
 - [ ] This PR stays within the linked issue scope.
-- [ ] This PR does not add a daemon, MCP dependency, embeddings, database, watcher, product UI, telemetry, or cloud sync unless explicitly approved in the proposal.
+- [ ] This PR does not add a daemon, MCP dependency, embeddings, database, watcher, product UI, telemetry, or cloud sync unless maintainers explicitly approved a scope change.

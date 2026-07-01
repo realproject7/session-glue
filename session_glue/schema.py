@@ -23,8 +23,7 @@ import re
 from dataclasses import dataclass, field, fields
 from typing import Any
 
-# Required frontmatter fields, in canonical order (see the founding ticket
-# "Handoff schema and fixture library").
+# Required frontmatter fields, in canonical order.
 REQUIRED_FIELDS: tuple[str, ...] = (
     "session_id",
     "session_date",
@@ -54,8 +53,7 @@ _LIST_FIELDS_ALLOW_EMPTY: frozenset[str] = frozenset(
 )
 
 # Case-insensitive phrases that signal a resume mechanic rather than a
-# productive work item. Guardrail only — not a semantic judge (see proposal
-# §10.2 and the ticket "Critical Rule").
+# productive work item. Guardrail only — not a semantic judge.
 RESUME_MECHANIC_PHRASES: tuple[str, ...] = (
     "paste",
     "start a new session",
