@@ -52,6 +52,29 @@ glue install cursor --dry-run
 glue install gemini --dry-run
 ```
 
+### `glue create`
+
+`glue create` archives an agent-composed handoff into the repository-local
+`.agent-history/` directory. The agent writes the handoff document (YAML
+frontmatter plus a narrative body — see the fixtures under
+`tests/fixtures/handoffs/`); the CLI persists it:
+
+```bash
+glue create --input handoff.md          # or pipe via stdin: glue create < handoff.md
+glue create --input handoff.md --repo-root /path/to/project
+```
+
+It creates or updates:
+
+- `.agent-history/sessions/<session>.md` — the archived session
+- `.agent-history/LATEST.md` — a copy of the newest handoff
+- `.agent-history/RESUME_PROMPT.txt` — the copy-paste resume prompt
+- `.agent-history/INDEX.yaml` — compact metadata and a session list
+
+The handoff is validated first: a missing required field or a resume-mechanic
+`next_todo_items[0]` is rejected before anything is written. `glue create` never
+accesses the network or the OS clipboard.
+
 ## Development
 
 Implementation should follow the founding tickets in the proposal. Do not add daemons, background sync, retrieval services, or UI surfaces to the MVP unless the proposal is explicitly updated first.
