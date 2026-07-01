@@ -17,8 +17,10 @@ from session_glue.schema import Handoff, parse_mapping
 
 FIXTURES = Path(__file__).parent / "fixtures" / "handoffs"
 VALID = (FIXTURES / "valid.md").read_text(encoding="utf-8")
-FIRST_ACTION = "Add polling lifecycle with cleanup"
-SESSION_ID = "2026-06-30-1530-price-chart-polling"
+# Derive expected values from the fixture so they never drift from valid.md.
+_FIXTURE = Handoff.from_text(VALID)
+FIRST_ACTION = _FIXTURE.next_todo_items[0]
+SESSION_ID = _FIXTURE.session_id
 
 
 def _create(tmp_path: Path, text: str) -> int:
@@ -153,7 +155,7 @@ def test_non_handoff_input_is_rejected(tmp_path):
         ("....", "session"),
         ("", "session"),
         (None, "session"),
-        ("2026-06-30-1530-price-chart-polling", "2026-06-30-1530-price-chart-polling"),
+        (SESSION_ID, SESSION_ID),  # an already-safe id slugifies to itself
     ],
 )
 def test_slugify_prevents_path_traversal(raw, expected):

@@ -38,6 +38,7 @@ def _snapshot(root: Path) -> dict[str, bytes]:
 
 def test_status_reports_compact_fields(tmp_path, capsys):
     _build_history(tmp_path)
+    capsys.readouterr()  # drop the setup `glue create` output
     assert main(["status", "--repo-root", str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert ".agent-history: present" in out
@@ -51,6 +52,7 @@ def test_status_reports_compact_fields(tmp_path, capsys):
 
 def test_status_does_not_print_full_narrative(tmp_path, capsys):
     _build_history(tmp_path)
+    capsys.readouterr()  # drop the setup `glue create` output
     main(["status", "--repo-root", str(tmp_path)])
     out = capsys.readouterr().out
     # Token-economics: the session narrative body must not be reproduced.
@@ -66,6 +68,7 @@ def test_status_handles_missing_history(tmp_path, capsys):
 def test_status_summarizes_validation_problems(tmp_path, capsys):
     hist = _build_history(tmp_path)
     (hist / "RESUME_PROMPT.txt").unlink()
+    capsys.readouterr()  # drop the setup `glue create` output
     # Present history still reports (exit 0), but flags the validation problem.
     assert main(["status", "--repo-root", str(tmp_path)]) == 0
     out = capsys.readouterr().out
@@ -81,6 +84,7 @@ def test_status_summarizes_validation_problems(tmp_path, capsys):
 def test_resume_prompt_prints_exact_file_contents(tmp_path, capsys):
     hist = _build_history(tmp_path)
     expected = (hist / "RESUME_PROMPT.txt").read_text(encoding="utf-8")
+    capsys.readouterr()  # drop the setup `glue create` output before the exact check
     assert main(["resume-prompt", "--repo-root", str(tmp_path)]) == 0
     assert capsys.readouterr().out == expected
 

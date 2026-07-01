@@ -12,12 +12,15 @@ from pathlib import Path
 import pytest
 
 from session_glue.cli import main
-from session_glue.schema import lint_first_next_action
+from session_glue.schema import Handoff, lint_first_next_action
 
 FIXTURES = Path(__file__).parent / "fixtures" / "handoffs"
 VALID = (FIXTURES / "valid.md").read_text(encoding="utf-8")
 MISSING_FIELD = (FIXTURES / "invalid_missing_field.md").read_text(encoding="utf-8")
-FIRST_ACTION = "Add polling lifecycle with cleanup"
+# Derive expected values from the fixture so they never drift from valid.md.
+_FIXTURE = Handoff.from_text(VALID)
+FIRST_ACTION = _FIXTURE.next_todo_items[0]
+SESSION_ID = _FIXTURE.session_id
 
 
 def _build_history(repo: Path) -> Path:
@@ -104,7 +107,7 @@ def test_validate_reports_missing_history(tmp_path, capsys):
 
 def test_sessions_flag_validates_archived_files(tmp_path, capsys):
     hist = _build_history(tmp_path)
-    archive = hist / "sessions" / "2026-06-30-1530-price-chart-polling.md"
+    archive = hist / "sessions" / f"{SESSION_ID}.md"
     archive.write_text(_drop_lines(archive.read_text(encoding="utf-8"), "head_commit:"), "utf-8")
 
     # Without --sessions the corrupt archive is ignored (LATEST/INDEX still fine).
@@ -112,7 +115,7 @@ def test_sessions_flag_validates_archived_files(tmp_path, capsys):
     # With --sessions it is caught.
     assert _validate(tmp_path, "--sessions") == 1
     err = capsys.readouterr().err
-    assert "sessions/2026-06-30-1530-price-chart-polling.md" in err
+    assert f"sessions/{SESSION_ID}.md" in err
     assert "head_commit" in err
 
 
