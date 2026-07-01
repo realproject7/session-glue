@@ -390,6 +390,7 @@ def build_resume_prompt(handoff: Handoff) -> str:
         "\n"
         f"Project root: {project_root}\n"
         "First, read: .agent-history/LATEST.md\n"
+        "Prompt artifact: .agent-history/RESUME_PROMPT.txt\n"
         "Then follow the Resume Prompt and continue from the first "
         "next_todo_items entry.\n"
         "\n"

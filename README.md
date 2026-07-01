@@ -105,7 +105,7 @@ current branch, head commit, and first next action, plus a one-line validation
 summary. It deliberately does **not** print the full session narrative, so it
 orients you without recreating context bloat, and it handles a missing
 `.agent-history/` gracefully. `glue resume-prompt` prints the exact contents of
-`RESUME_PROMPT.txt`. Both are strictly read-only.
+`.agent-history/RESUME_PROMPT.txt`. Both are strictly read-only.
 
 ### `glue install <agent> --dry-run`
 

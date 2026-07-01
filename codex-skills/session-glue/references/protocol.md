@@ -68,6 +68,7 @@ Continue the previous coding session.
 
 Project root: /path/to/project
 First, read: .agent-history/LATEST.md
+Prompt artifact: .agent-history/RESUME_PROMPT.txt
 Then follow the Resume Prompt and continue from the first next_todo_items entry.
 
 First productive next action (next_todo_items[0]):
@@ -78,6 +79,17 @@ Do not scan the whole repository unless the handoff is stale or insufficient.
 ```
 
 After writing the files, print the exact prompt in a fenced code block.
+
+## Dogfood Harness Guidance
+
+When testing Session Glue with a fresh agent, keep two roles separate:
+
+- The outer observer starts fresh-agent trials and records behavior.
+- The trial subject only resumes from the handoff and reports what it did.
+
+Do not make the trial subject's first productive action "run a fresh agent
+trial" or "start another agent". That can create a meta-loop where the resumed
+agent launches another resumed agent instead of being the test subject.
 
 ## INDEX.yaml
 
