@@ -61,7 +61,6 @@ RESUME_MECHANIC_PHRASES: tuple[str, ...] = (
     "start a new session",
     "new session",
     "read latest",
-    "read `latest.md`",
     "read latest.md",
     "resume prompt",
     "inspect the handoff",
@@ -341,7 +340,9 @@ def lint_first_next_action(item: Any) -> str | None:
     """Return an error string if ``item`` looks like a resume mechanic, else None."""
     if item is None:
         return "next_todo_items[0] is missing"
-    text = str(item).lower()
+    # Strip markdown code backticks so phrases match regardless of how the
+    # action is typeset, e.g. "Inspect `LATEST.md`" -> "inspect latest.md".
+    text = str(item).lower().replace("`", "")
     for phrase in RESUME_MECHANIC_PHRASES:
         if phrase in text:
             return (

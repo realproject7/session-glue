@@ -127,9 +127,11 @@ def test_sessions_flag_validates_archived_files(tmp_path, capsys):
         "Start a new session",
         "Paste the prompt",
         "Read LATEST.md",
+        "Read `LATEST.md`",  # markdown-backtick form
         "Inspect the handoff",
         "Inspect handoff",
         "Inspect LATEST.md",
+        "Inspect `LATEST.md`",  # markdown-backtick form (issue #5 explicit case)
         "Verify resume worked",
         "Check whether the new agent resumed correctly",
     ],
