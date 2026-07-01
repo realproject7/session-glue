@@ -109,6 +109,27 @@ orients you without recreating context bloat, and it handles a missing
 `.agent-history/` gracefully. `glue resume-prompt` prints the exact contents of
 `RESUME_PROMPT.txt`. Both are strictly read-only.
 
+### `glue install <agent> --dry-run`
+
+`glue install` shows the managed instruction block Session Glue would add to a
+coding agent's global instruction file, so agents know how to respond to
+`/glue`, `/freeze`, `/handoff`, and `/checkpoint`:
+
+```bash
+glue install codex --dry-run
+glue install claude --dry-run
+glue install cursor --dry-run
+glue install gemini --dry-run
+glue install all --dry-run
+```
+
+It prints the target path and the proposed block (delimited by stable
+`<!-- BEGIN/END SESSION GLUE (managed) -->` markers so a future updater can
+replace it idempotently). **Only `--dry-run` is supported** — it never modifies
+your home directory, and real installation is intentionally not implemented
+(operator-gated). Running `glue install <agent>` without `--dry-run` exits with
+an error.
+
 ## Development
 
 Implementation should follow the founding tickets in the proposal. Do not add daemons, background sync, retrieval services, or UI surfaces to the MVP unless the proposal is explicitly updated first.
