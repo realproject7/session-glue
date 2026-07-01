@@ -1,5 +1,7 @@
 # Session Glue QuadWork Batch 1
 
+## Active Batch
+
 Dispatch target: QuadWork project `session-glue`, repo `realproject7/session-glue`.
 
 Operator instruction:
