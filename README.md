@@ -8,8 +8,6 @@ Its goal is simple: when an agent session gets too long, create a compact local 
 
 Pre-MVP founding repository.
 
-The canonical product proposal lives in [`docs/PROPOSAL-session-glue.md`](docs/PROPOSAL-session-glue.md).
-
 ## Product Boundary
 
 Session Glue v1 is intentionally small:
@@ -132,7 +130,7 @@ an error.
 
 ## Development
 
-Implementation should follow the founding tickets in the proposal. Do not add daemons, background sync, retrieval services, or UI surfaces to the MVP unless the proposal is explicitly updated first.
+Keep the MVP small. Do not add daemons, background sync, retrieval services, or UI surfaces unless the project scope explicitly changes first.
 
 Session Glue targets Python 3.10+ and has **no required runtime dependencies** — the CLI is built on the standard library so it can be installed and trusted immediately.
 

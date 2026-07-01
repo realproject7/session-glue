@@ -1,11 +1,15 @@
 .DS_Store
 .env
+.env.*
+*.local
 .venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+*.log
 dist/
 build/
 *.egg-info/
 .agent-history/
+/docs/
