@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "session-glue"
+dynamic = ["version"]
+description = "A zero-daemon, repo-local session-continuity protocol and CLI for coding agents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Session Glue" }]
+keywords = ["agent", "handoff", "session", "continuity", "cli", "memory", "codex", "claude"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Utilities",
+]
+# No required runtime dependencies in v1: the CLI is intentionally stdlib-only
+# so it can be trusted and installed immediately (see docs/PROPOSAL-session-glue.md §13.3).
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/realproject7/session-glue"
+Repository = "https://github.com/realproject7/session-glue"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+glue = "session_glue.cli:main"
+session-glue = "session_glue.cli:main"
+
+[tool.hatch.version]
+path = "session_glue/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["session_glue"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100

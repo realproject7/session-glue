@@ -55,3 +55,36 @@ glue install gemini --dry-run
 ## Development
 
 Implementation should follow the founding tickets in the proposal. Do not add daemons, background sync, retrieval services, or UI surfaces to the MVP unless the proposal is explicitly updated first.
+
+Session Glue targets Python 3.10+ and has **no required runtime dependencies** — the CLI is built on the standard library so it can be installed and trusted immediately.
+
+### Local install
+
+Create and activate a virtual environment, then install the package in editable mode with the development extras:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+python -m pip install -e ".[dev]"
+```
+
+### Verify the CLI
+
+```bash
+glue --help
+glue --version
+session-glue --help              # fallback executable
+python -m session_glue --help    # module invocation
+```
+
+### Run the tests
+
+```bash
+pytest
+```
+
+### Lint (optional)
+
+```bash
+ruff check .
+```
