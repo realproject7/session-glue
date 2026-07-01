@@ -3,6 +3,7 @@
 .env.*
 *.local
 .venv/
+.po/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -11,5 +12,6 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+.eggs/
 .agent-history/
 /docs/
