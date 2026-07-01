@@ -3,8 +3,8 @@ schema_version: 1
 session_id: 2026-06-30-1530-price-chart-polling
 session_date: 2026-06-30
 generated_at: 2026-06-30T15:30:00+09:00
-project_root: /Users/cho/Projects/roomme
-repo_root: /Users/cho/Projects/roomme
+project_root: /home/user/projects/example-app
+repo_root: /home/user/projects/example-app
 current_branch: main
 head_commit: abc1234
 agent: codex

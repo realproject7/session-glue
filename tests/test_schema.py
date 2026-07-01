@@ -178,7 +178,7 @@ def test_dump_mapping_round_trips_scalars_and_sequences():
     "value",
     [
         'label: "done"',  # colon forces quoting; embedded quotes must escape
-        r"a path with a backslash C:\Users\cho",
+        r"a path with a backslash C:\proj\example",
         r'both \ and " together',
         "trailing backslash \\",
     ],
