@@ -1,23 +1,25 @@
 """Command-line entry point for Session Glue.
 
 This module wires up the ``glue`` (and fallback ``session-glue``) console
-scripts. In this scaffolding ticket the subcommands are placeholders only —
-no ``.agent-history/`` writing, validation, or installer behavior is
-implemented yet. The CLI is built on :mod:`argparse` from the standard library
-so the package has no required runtime dependencies.
+scripts. ``glue create`` is implemented (see :mod:`session_glue.writer`); the
+remaining subcommands are placeholders for later tickets. The CLI is built on
+:mod:`argparse` from the standard library so the package has no required
+runtime dependencies.
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Sequence
+from pathlib import Path
 
-from . import __version__
+from . import __version__, writer
+from .schema import Handoff, HandoffParseError, parse_frontmatter
 
-# Subcommands planned for later tickets. Registered here as placeholders so the
-# help output reflects the intended command surface without implementing behavior.
+# Subcommands still awaiting implementation in later tickets. Registered as
+# placeholders so the help output reflects the intended command surface.
 _PLACEHOLDER_COMMANDS: tuple[tuple[str, str], ...] = (
-    ("create", "Write a session handoff (not yet implemented)."),
     ("validate", "Validate handoff frontmatter and index (not yet implemented)."),
     ("status", "Show current .agent-history status (not yet implemented)."),
     ("resume-prompt", "Print the current resume prompt (not yet implemented)."),
@@ -40,11 +42,82 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
+
+    create = subparsers.add_parser(
+        "create",
+        help="Archive a handoff into .agent-history/ and update pointers.",
+        description=(
+            "Write an agent-composed handoff (frontmatter + body) into "
+            ".agent-history/: archive a timestamped session file, refresh "
+            "LATEST.md, RESUME_PROMPT.txt, and INDEX.yaml."
+        ),
+    )
+    create.add_argument(
+        "--input",
+        "-i",
+        default="-",
+        metavar="PATH",
+        help="Handoff markdown file (frontmatter + body). Use '-' for stdin (default).",
+    )
+    create.add_argument(
+        "--repo-root",
+        default=".",
+        metavar="PATH",
+        help="Repository root that holds .agent-history/ (default: current directory).",
+    )
+    create.set_defaults(func=_cmd_create)
+
     for name, help_text in _PLACEHOLDER_COMMANDS:
         sub = subparsers.add_parser(name, help=help_text, description=help_text)
         sub.set_defaults(func=_not_implemented)
 
     return parser
+
+
+def _read_input(source: str) -> str:
+    """Read handoff text from a file path or stdin (``-``)."""
+    if source == "-":
+        return sys.stdin.read()
+    return Path(source).read_text(encoding="utf-8")
+
+
+def _cmd_create(args: argparse.Namespace) -> int:
+    """Implement ``glue create``."""
+    try:
+        text = _read_input(args.input)
+    except OSError as exc:
+        print(f"glue create: cannot read input: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        frontmatter, body = parse_frontmatter(text)
+    except HandoffParseError as exc:
+        print(f"glue create: invalid handoff: {exc}", file=sys.stderr)
+        return 2
+
+    handoff = Handoff.from_frontmatter(frontmatter, body)
+    errors = handoff.validate()
+    if errors:
+        print("glue create: handoff failed validation:", file=sys.stderr)
+        for error in errors:
+            print(f"  - {error}", file=sys.stderr)
+        return 2
+
+    repo_root = Path(args.repo_root)
+    if not repo_root.is_dir():
+        print(f"glue create: repo root is not a directory: {repo_root}", file=sys.stderr)
+        return 1
+
+    written = writer.create_handoff(
+        repo_root=repo_root,
+        frontmatter=frontmatter,
+        body=body,
+        handoff=handoff,
+    )
+    print("Wrote handoff for session " + str(handoff.session_id) + ":")
+    for label in ("archive", "latest", "resume_prompt", "index"):
+        print(f"  {label}: {written[label]}")
+    return 0
 
 
 def _not_implemented(args: argparse.Namespace) -> int:
