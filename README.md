@@ -88,3 +88,9 @@ pytest
 ```bash
 ruff check .
 ```
+
+## Contributing
+
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening issues or pull requests. All public content must avoid credentials, private logs, `.env` contents, and personal local paths.
+
+For vulnerability reports, see [`SECURITY.md`](SECURITY.md).

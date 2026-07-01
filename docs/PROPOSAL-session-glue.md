@@ -274,7 +274,7 @@ The operator starts a new session by pasting the generated prompt:
 ```text
 Continue the previous coding session.
 
-Project root: /Users/cho/Projects/roomme
+Project root: /path/to/example-app
 First, read: .agent-history/LATEST.md
 Then follow the Resume Prompt and continue from the first next_todo_items entry.
 
@@ -291,7 +291,7 @@ The new agent reads the handoff first, inspects only the listed active files unl
 When a previous handoff may matter:
 
 ```bash
-rg "polling|supabase|PriceChart" .agent-history
+rg "polling|chart|empty-state" .agent-history
 ```
 
 or:
@@ -312,8 +312,8 @@ The system should work even without a dedicated search command.
 ├── RESUME_PROMPT.txt
 ├── INDEX.yaml
 ├── sessions/
-│   ├── 2026-06-30-1530-price-chart-polling.md
-│   └── 2026-06-30-1715-supabase-security-lints.md
+│   ├── 2026-06-30-1530-chart-polling.md
+│   └── 2026-06-30-1715-database-migration-review.md
 └── templates/
     └── handoff-template.md            # optional
 ```
@@ -358,7 +358,7 @@ Example:
 ```text
 Continue the previous coding session.
 
-Project root: /Users/cho/Projects/roomme
+Project root: /path/to/example-app
 First, read: .agent-history/LATEST.md
 Then follow the Resume Prompt and continue from the first next_todo_items entry.
 
@@ -375,19 +375,19 @@ Each handoff file should use YAML frontmatter followed by a structured narrative
 ```markdown
 ---
 memory_schema_version: 1
-session_id: 2026-06-30-1530-price-chart-polling
+session_id: 2026-06-30-1530-chart-polling
 created_at: 2026-06-30T15:30:00+09:00
 agent: codex
-project: roomme
-repo_root: /Users/cho/Projects/roomme
+project: example-app
+repo_root: /path/to/example-app
 branch: main
 head_commit: abc1234
 status: in_progress
-primary_goal: "Add real-time polling to PriceChart"
+primary_goal: "Add real-time polling to the chart view"
 active_context_files:
-  - path: src/components/PriceChart.tsx
+  - path: src/components/ChartView.tsx
     reason: "Main implementation target"
-  - path: scripts/fix-supabase-security-lints.sql
+  - path: scripts/review-database-migration.sql
     reason: "Open IDE context; may be related to database work"
 completed_tasks:
   - "Implemented static chart layout"
@@ -512,21 +512,21 @@ This lint is only a guardrail for obvious mistakes. It is not a semantic judge o
 
 ```yaml
 schema_version: 1
-latest: 2026-06-30-1530-price-chart-polling
+latest: 2026-06-30-1530-chart-polling
 sessions:
-  - session_id: 2026-06-30-1530-price-chart-polling
-    file: sessions/2026-06-30-1530-price-chart-polling.md
+  - session_id: 2026-06-30-1530-chart-polling
+    file: sessions/2026-06-30-1530-chart-polling.md
     created_at: 2026-06-30T15:30:00+09:00
     agent: codex
-    project: roomme
-    repo_root: /Users/cho/Projects/roomme
+    project: example-app
+    repo_root: /path/to/example-app
     branch: main
     head_commit: abc1234
     status: in_progress
-    primary_goal: "Add real-time polling to PriceChart"
+    primary_goal: "Add real-time polling to the chart view"
     first_next_action: "Add polling lifecycle with cleanup"
     active_context_files:
-      - src/components/PriceChart.tsx
+      - src/components/ChartView.tsx
     search_tags:
       - frontend
       - chart
@@ -623,9 +623,9 @@ The CLI should not summarize the session. The agent must do that because the age
 ```bash
 glue create \
   --agent codex \
-  --project roomme \
+  --project example-app \
   --status in_progress \
-  --goal "Add real-time polling to PriceChart" \
+  --goal "Add real-time polling to the chart view" \
   --input /tmp/handoff-body.md
 ```
 
@@ -639,7 +639,7 @@ Search helpers:
 
 ```bash
 glue status
-glue search "polling supabase"
+glue search "polling chart"
 ```
 
 For v1, the CLI can also be bundled inside a Codex skill, but the durable distribution target should be PyPI so any agent environment can install the same tool.
@@ -919,7 +919,7 @@ Then the agent should print a separate fenced block containing the exact generat
 ```text
 Continue the previous coding session.
 
-Project root: /Users/cho/Projects/roomme
+Project root: /path/to/example-app
 First, read: .agent-history/LATEST.md
 Then follow the Resume Prompt and continue from the first next_todo_items entry.
 
