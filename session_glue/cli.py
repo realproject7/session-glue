@@ -1,9 +1,10 @@
 """Command-line entry point for Session Glue.
 
 This module wires up the ``glue`` (and fallback ``session-glue``) console
-scripts. It implements ``glue create``, ``glue validate``, ``glue status``, and
-``glue resume-prompt`` (see :mod:`session_glue.writer`,
-:mod:`session_glue.validator`, and :mod:`session_glue.reader`). The CLI is built
+scripts. It implements ``glue create``, ``glue validate``, ``glue status``,
+``glue resume-prompt``, and ``glue install --dry-run`` (see
+:mod:`session_glue.writer`, :mod:`session_glue.validator`,
+:mod:`session_glue.reader`, and :mod:`session_glue.installer`). The CLI is built
 on :mod:`argparse` from the standard library so the package has no required
 runtime dependencies.
 """
@@ -15,7 +16,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, reader, validator, writer
+from . import __version__, installer, reader, validator, writer
 from .schema import Handoff, HandoffParseError, parse_frontmatter
 
 
@@ -111,6 +112,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Repository root that holds .agent-history/ (default: current directory).",
     )
     resume_prompt.set_defaults(func=_cmd_resume_prompt)
+
+    install = subparsers.add_parser(
+        "install",
+        help="Show the managed instruction block for a coding agent (dry-run only).",
+        description=(
+            "Dry-run only: print the target instruction file and the managed "
+            "Session Glue block that would be added for a coding agent. Never "
+            "modifies user-home files; real installation is not implemented "
+            "(operator-gated)."
+        ),
+    )
+    install.add_argument(
+        "agent",
+        choices=(*installer.AGENT_ORDER, "all"),
+        help="Coding agent to show the install block for (or 'all').",
+    )
+    install.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Required: print the target path and proposed block without writing.",
+    )
+    install.set_defaults(func=_cmd_install)
 
     return parser
 
@@ -209,6 +232,28 @@ def _cmd_resume_prompt(args: argparse.Namespace) -> int:
         return 1
     # Print the file contents exactly (no added or stripped trailing newline).
     sys.stdout.write(text)
+    return 0
+
+
+def _cmd_install(args: argparse.Namespace) -> int:
+    """Implement ``glue install <agent> --dry-run`` (dry-run only)."""
+    if not args.dry_run:
+        print(
+            "glue install: only --dry-run is supported; real installation is "
+            "operator-gated and not implemented. Re-run with --dry-run.",
+            file=sys.stderr,
+        )
+        return 2
+
+    block = installer.managed_block()
+    for target in installer.resolve_agents(args.agent):
+        print(f"# {target.name} (dry-run — no files modified)")
+        print(f"target: {target.target}")
+        if target.note:
+            print(f"note: {target.note}")
+        print("proposed block:")
+        print(block)
+        print()
     return 0
 
 

@@ -36,7 +36,7 @@ def test_no_args_prints_help_and_exits_zero(capsys):
     assert "usage" in out.lower()
 
 
-@pytest.mark.parametrize("command", ["create", "validate", "status", "resume-prompt"])
+@pytest.mark.parametrize("command", ["create", "validate", "status", "resume-prompt", "install"])
 def test_subcommands_are_registered(command, capsys):
     with pytest.raises(SystemExit) as exc_info:
         main([command, "--help"])
