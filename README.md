@@ -6,7 +6,11 @@ Its goal is simple: when an agent session gets too long, create a compact local 
 
 ## Status
 
-Pre-MVP founding repository.
+Initial public alpha: `0.1.0`.
+
+```bash
+pip install session-glue==0.1.0
+```
 
 ## Product Boundary
 
@@ -23,7 +27,7 @@ Session Glue v1 is intentionally small:
 - no file watcher
 - no product UI
 
-## Planned CLI
+## CLI
 
 Primary executable:
 
@@ -37,7 +41,7 @@ Fallback executable:
 session-glue
 ```
 
-Planned commands:
+Commands:
 
 ```bash
 glue create
