@@ -39,12 +39,12 @@ def test_valid_fixture_parses_cleanly():
     assert handoff.validate() == []
     assert handoff.is_valid()
 
-    assert handoff.session_id == "2026-06-30-1530-price-chart-polling"
+    assert handoff.session_id == "2026-06-30-1530-chart-polling"
     assert handoff.schema_version == 1  # integers parse as ints
     assert handoff.status == "in_progress"
     # Block sequence of mappings.
     assert handoff.active_context_files[0] == {
-        "path": "src/components/PriceChart.tsx",
+        "path": "src/components/ChartView.tsx",
         "reason": "Main implementation target",
     }
     # Block sequence of scalars.

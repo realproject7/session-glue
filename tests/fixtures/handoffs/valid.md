@@ -1,6 +1,6 @@
 ---
 schema_version: 1
-session_id: 2026-06-30-1530-price-chart-polling
+session_id: 2026-06-30-1530-chart-polling
 session_date: 2026-06-30
 generated_at: 2026-06-30T15:30:00+09:00
 project_root: /path/to/project
@@ -10,9 +10,9 @@ head_commit: abc1234
 agent: codex
 status: in_progress
 active_context_files:
-  - path: src/components/PriceChart.tsx
+  - path: src/components/ChartView.tsx
     reason: "Main implementation target"
-  - path: scripts/fix-supabase-security-lints.sql
+  - path: scripts/review-database-migration.sql
     reason: "Open IDE context; may be related to database work"
 completed_tasks:
   - "Implemented static chart layout"
@@ -37,7 +37,7 @@ Implemented the static chart layout.
 
 ## Current State
 
-`src/components/PriceChart.tsx` is the canonical implementation target. The repo
+`src/components/ChartView.tsx` is the canonical implementation target. The repo
 is dirty with the static layout work.
 
 ## Next-Agent Instructions

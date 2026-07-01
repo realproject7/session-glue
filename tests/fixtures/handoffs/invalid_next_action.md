@@ -10,7 +10,7 @@ head_commit: abc1234
 agent: codex
 status: in_progress
 active_context_files:
-  - path: src/components/PriceChart.tsx
+  - path: src/components/ChartView.tsx
     reason: "Main implementation target"
 completed_tasks:
   - "Implemented static chart layout"
