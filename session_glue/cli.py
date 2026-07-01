@@ -1,8 +1,9 @@
 """Command-line entry point for Session Glue.
 
 This module wires up the ``glue`` (and fallback ``session-glue``) console
-scripts. ``glue create`` is implemented (see :mod:`session_glue.writer`); the
-remaining subcommands are placeholders for later tickets. The CLI is built on
+scripts. ``glue create`` and ``glue validate`` are implemented (see
+:mod:`session_glue.writer` and :mod:`session_glue.validator`); the remaining
+subcommands are placeholders for later tickets. The CLI is built on
 :mod:`argparse` from the standard library so the package has no required
 runtime dependencies.
 """
@@ -14,13 +15,12 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, writer
+from . import __version__, validator, writer
 from .schema import Handoff, HandoffParseError, parse_frontmatter
 
 # Subcommands still awaiting implementation in later tickets. Registered as
 # placeholders so the help output reflects the intended command surface.
 _PLACEHOLDER_COMMANDS: tuple[tuple[str, str], ...] = (
-    ("validate", "Validate handoff frontmatter and index (not yet implemented)."),
     ("status", "Show current .agent-history status (not yet implemented)."),
     ("resume-prompt", "Print the current resume prompt (not yet implemented)."),
 )
@@ -66,6 +66,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Repository root that holds .agent-history/ (default: current directory).",
     )
     create.set_defaults(func=_cmd_create)
+
+    validate = subparsers.add_parser(
+        "validate",
+        help="Validate .agent-history/ handoff artifacts.",
+        description=(
+            "Validate LATEST.md frontmatter, the next_todo_items[0] lint, "
+            "RESUME_PROMPT.txt presence, and INDEX.yaml consistency. Exits "
+            "non-zero if any problem is found."
+        ),
+    )
+    validate.add_argument(
+        "--repo-root",
+        default=".",
+        metavar="PATH",
+        help="Repository root that holds .agent-history/ (default: current directory).",
+    )
+    validate.add_argument(
+        "--sessions",
+        action="store_true",
+        help="Also validate archived session files under sessions/.",
+    )
+    validate.set_defaults(func=_cmd_validate)
 
     for name, help_text in _PLACEHOLDER_COMMANDS:
         sub = subparsers.add_parser(name, help=help_text, description=help_text)
@@ -121,6 +143,20 @@ def _cmd_create(args: argparse.Namespace) -> int:
     print("Wrote handoff for session " + str(handoff.session_id) + ":")
     for label in ("archive", "latest", "resume_prompt", "index"):
         print(f"  {label}: {written[label]}")
+    return 0
+
+
+def _cmd_validate(args: argparse.Namespace) -> int:
+    """Implement ``glue validate``."""
+    problems = validator.validate_history(
+        Path(args.repo_root), check_sessions=args.sessions
+    )
+    if problems:
+        print("glue validate: found problems:", file=sys.stderr)
+        for problem in problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 1
+    print("glue validate: OK")
     return 0
 
 
