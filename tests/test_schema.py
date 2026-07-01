@@ -158,9 +158,11 @@ def test_resume_prompt_points_at_latest_and_first_action():
     handoff = Handoff.from_text(_read("valid.md"))
     prompt = build_resume_prompt(handoff)
     assert ".agent-history/LATEST.md" in prompt
+    assert "Prompt artifact: .agent-history/RESUME_PROMPT.txt" in prompt
     assert "next_todo_items" in prompt
     assert handoff.next_todo_items[0] in prompt
     assert handoff.project_root in prompt
+    assert "First, read: RESUME_PROMPT.txt" not in prompt
 
 
 # --------------------------------------------------------------------------- #

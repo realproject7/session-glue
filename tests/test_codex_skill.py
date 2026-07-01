@@ -53,6 +53,13 @@ def test_fallback_protocol_matches_v1_schema_contract():
     assert "next_todo_items[0], must be productive work" in PROTOCOL
     assert "first_next_action:" in PROTOCOL
     assert "Do not duplicate the narrative" in PROTOCOL
+    assert "Prompt artifact: .agent-history/RESUME_PROMPT.txt" in PROTOCOL
+
+
+def test_fallback_protocol_avoids_dogfood_meta_loop():
+    assert "outer observer starts fresh-agent trials" in PROTOCOL
+    assert "trial subject only resumes from the handoff" in PROTOCOL
+    assert "Do not make the trial subject's first productive action" in PROTOCOL
 
 
 def test_openai_yaml_mentions_skill_name_in_default_prompt():
