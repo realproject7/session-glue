@@ -1,10 +1,10 @@
 """Command-line entry point for Session Glue.
 
 This module wires up the ``glue`` (and fallback ``session-glue``) console
-scripts. ``glue create`` and ``glue validate`` are implemented (see
-:mod:`session_glue.writer` and :mod:`session_glue.validator`); the remaining
-subcommands are placeholders for later tickets. The CLI is built on
-:mod:`argparse` from the standard library so the package has no required
+scripts. It implements ``glue create``, ``glue validate``, ``glue status``, and
+``glue resume-prompt`` (see :mod:`session_glue.writer`,
+:mod:`session_glue.validator`, and :mod:`session_glue.reader`). The CLI is built
+on :mod:`argparse` from the standard library so the package has no required
 runtime dependencies.
 """
 
@@ -15,15 +15,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, validator, writer
+from . import __version__, reader, validator, writer
 from .schema import Handoff, HandoffParseError, parse_frontmatter
-
-# Subcommands still awaiting implementation in later tickets. Registered as
-# placeholders so the help output reflects the intended command surface.
-_PLACEHOLDER_COMMANDS: tuple[tuple[str, str], ...] = (
-    ("status", "Show current .agent-history status (not yet implemented)."),
-    ("resume-prompt", "Print the current resume prompt (not yet implemented)."),
-)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,9 +82,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate.set_defaults(func=_cmd_validate)
 
-    for name, help_text in _PLACEHOLDER_COMMANDS:
-        sub = subparsers.add_parser(name, help=help_text, description=help_text)
-        sub.set_defaults(func=_not_implemented)
+    status = subparsers.add_parser(
+        "status",
+        help="Show compact .agent-history/ status.",
+        description=(
+            "Print compact metadata from INDEX.yaml (latest session/file, "
+            "branch, head commit, first next action) and a cheap validation "
+            "summary. Does not print the full session narrative."
+        ),
+    )
+    status.add_argument(
+        "--repo-root",
+        default=".",
+        metavar="PATH",
+        help="Repository root that holds .agent-history/ (default: current directory).",
+    )
+    status.set_defaults(func=_cmd_status)
+
+    resume_prompt = subparsers.add_parser(
+        "resume-prompt",
+        help="Print .agent-history/RESUME_PROMPT.txt exactly.",
+        description="Print the exact contents of .agent-history/RESUME_PROMPT.txt.",
+    )
+    resume_prompt.add_argument(
+        "--repo-root",
+        default=".",
+        metavar="PATH",
+        help="Repository root that holds .agent-history/ (default: current directory).",
+    )
+    resume_prompt.set_defaults(func=_cmd_resume_prompt)
 
     return parser
 
@@ -160,9 +179,36 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _not_implemented(args: argparse.Namespace) -> int:
-    """Placeholder handler for commands that are not implemented yet."""
-    print(f"'glue {args.command}' is not implemented yet.")
+def _cmd_status(args: argparse.Namespace) -> int:
+    """Implement ``glue status``."""
+    status = reader.collect_status(Path(args.repo_root))
+    if not status.exists:
+        print(f"glue status: no .agent-history/ found at {status.history_dir}")
+        return 1
+
+    print(".agent-history: present")
+    index = status.index or {}
+    for label, key in reader.STATUS_FIELDS:
+        value = index.get(key)
+        print(f"{label}: {value if value not in (None, '') else '(unknown)'}")
+
+    if status.problems:
+        print(f"validation: {len(status.problems)} problem(s)")
+        for problem in status.problems:
+            print(f"  - {problem}")
+    else:
+        print("validation: OK")
+    return 0
+
+
+def _cmd_resume_prompt(args: argparse.Namespace) -> int:
+    """Implement ``glue resume-prompt``."""
+    text = reader.read_resume_prompt(Path(args.repo_root))
+    if text is None:
+        print("glue resume-prompt: no .agent-history/RESUME_PROMPT.txt found", file=sys.stderr)
+        return 1
+    # Print the file contents exactly (no added or stripped trailing newline).
+    sys.stdout.write(text)
     return 0
 
 

@@ -93,6 +93,22 @@ is a productive action (not a resume mechanic such as "paste the prompt" or
 exits non-zero and prints each problem when validation fails. Like the rest of
 the CLI, it never touches the network or an LLM.
 
+### `glue status` and `glue resume-prompt`
+
+Two compact, read-only commands for orienting a new session:
+
+```bash
+glue status           # latest session metadata + a cheap validation summary
+glue resume-prompt    # print .agent-history/RESUME_PROMPT.txt exactly
+```
+
+`glue status` reads `INDEX.yaml` and prints the latest session id, latest file,
+current branch, head commit, and first next action, plus a one-line validation
+summary. It deliberately does **not** print the full session narrative, so it
+orients you without recreating context bloat, and it handles a missing
+`.agent-history/` gracefully. `glue resume-prompt` prints the exact contents of
+`RESUME_PROMPT.txt`. Both are strictly read-only.
+
 ## Development
 
 Implementation should follow the founding tickets in the proposal. Do not add daemons, background sync, retrieval services, or UI surfaces to the MVP unless the proposal is explicitly updated first.
