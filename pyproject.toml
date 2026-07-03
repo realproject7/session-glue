@@ -36,6 +36,10 @@ Repository = "https://github.com/realproject7/session-glue"
 dev = [
     "pytest>=7",
     "ruff>=0.4",
+    # Build frontend + backend so the packaging tests can build and inspect the
+    # wheel/sdist locally without network isolation.
+    "build>=1",
+    "hatchling",
 ]
 
 [project.scripts]
@@ -45,8 +49,21 @@ session-glue = "session_glue.cli:main"
 [tool.hatch.version]
 path = "session_glue/__init__.py"
 
+# The wheel ships the whole ``session_glue`` package, including the bundled
+# skill assets under ``session_glue/assets/`` (Codex/Claude templates + the
+# shared fallback protocol). Because those assets live inside the package, they
+# are carried as package data automatically; keep them here (not in a separate
+# data dir) so a PyPI install can read them via importlib.resources without the
+# source checkout. ``artifacts`` guarantees they ship even if a future ignore
+# rule would otherwise exclude them.
 [tool.hatch.build.targets.wheel]
 packages = ["session_glue"]
+artifacts = ["session_glue/assets/**"]
+
+[tool.hatch.build.targets.sdist]
+# Preserve hatchling's default VCS file selection (which already vendors the
+# assets) and pin them explicitly so the sdist can never drop them.
+artifacts = ["session_glue/assets/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

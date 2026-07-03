@@ -1,0 +1,6 @@
+interface:
+  display_name: "Session Glue"
+  short_description: "Create and resume compact agent handoffs."
+  default_prompt: "Use $session-glue to create a compact handoff for this coding session."
+policy:
+  allow_implicit_invocation: true
