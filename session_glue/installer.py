@@ -59,7 +59,12 @@ class AgentTarget:
 # never opened or written during dry-run.
 AGENT_TARGETS: dict[str, AgentTarget] = {
     "codex": AgentTarget("codex", "~/.codex/AGENTS.md"),
-    "claude": AgentTarget("claude", "~/.claude/commands/glue.md"),
+    "claude": AgentTarget(
+        "claude",
+        "~/.claude/skills/session-glue/",
+        note="repo-scoped .claude/skills/session-glue/ is the recommended default; "
+        "user scope is explicit and reversible",
+    ),
     "cursor": AgentTarget(
         "cursor",
         "~/.cursor/rules/session-glue.md",

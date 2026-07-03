@@ -58,7 +58,7 @@ def test_has_managed_block_detects_fixtures():
     "agent,target",
     [
         ("codex", "~/.codex/AGENTS.md"),
-        ("claude", "~/.claude/commands/glue.md"),
+        ("claude", "~/.claude/skills/session-glue/"),
         ("cursor", "~/.cursor/rules/session-glue.md"),
         ("gemini", "~/.gemini/GEMINI.md"),
     ],
