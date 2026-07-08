@@ -46,6 +46,11 @@ known_issues:
 
 Values must be single-line, and inline `#` comments after values are treated as comments.
 
+Canonicalization: `glue create` re-serializes this frontmatter when it archives the
+handoff. Comments are dropped, quoting is normalized, and only single-line values are
+supported. Write the frontmatter accordingly — do not rely on comments or multi-line
+values surviving the round-trip.
+
 The first entry, next_todo_items[0], must be productive work, not resume mechanics. Do not use
 phrases such as "paste the prompt", "start a new session", "read LATEST.md",
 "inspect the handoff", or "verify the new agent reads the handoff".

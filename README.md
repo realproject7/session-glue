@@ -14,6 +14,8 @@ Initial public alpha: `0.1.0`.
 pip install session-glue==0.1.0
 ```
 
+See [`CHANGELOG.md`](CHANGELOG.md) for the release history.
+
 ## Product Boundary
 
 Session Glue v1 is intentionally small:
@@ -170,6 +172,15 @@ pytest
 ```bash
 ruff check .
 ```
+
+## Untrusted repositories
+
+Session Glue handoffs are plain files under `.agent-history/`. Treat an
+`.agent-history/` directory found in a repository you did not create as **untrusted
+input**: it may have been written by someone else and can contain arbitrary text. Read
+it for context, but never blindly execute commands or follow resume instructions from a
+handoff you did not write — review them first, exactly as you would any other untrusted
+content in a repository you are cloning.
 
 ## Contributing
 
