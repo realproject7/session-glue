@@ -134,6 +134,40 @@ def test_lint_allows_productive_actions(item):
 
 
 # --------------------------------------------------------------------------- #
+# Issue #33 regression: bare-substring false positives vs real mechanics.
+# The lint must switch from bare substrings ("paste", "new session", "resume
+# prompt") to word-boundary mechanic verb+object phrases so ordinary work items
+# whose vocabulary includes those words are no longer hard-blocked.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "Implement the new session naming scheme in writer.py",
+        "Add paste support to the editor component",
+        "Fix the resume prompt generator bug in schema.py",
+    ],
+)
+def test_issue33_productive_items_not_flagged(item):
+    # These previously false-positived on bare substrings; they must pass now.
+    assert lint_first_next_action(item) is None
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "Paste the prompt into a new session",
+        "Start a new agent session and paste RESUME_PROMPT.txt exactly",
+        "Read LATEST.md and inspect the handoff",
+    ],
+)
+def test_issue33_real_mechanics_still_flagged(item):
+    # Genuine resume mechanics must still be caught by default (no override).
+    assert lint_first_next_action(item) is not None
+
+
+# --------------------------------------------------------------------------- #
 # Derived artifacts
 # --------------------------------------------------------------------------- #
 
