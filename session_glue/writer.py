@@ -166,30 +166,6 @@ def build_index(existing: dict | None, handoff: Handoff, archive_file: str) -> d
     }
 
 
-def existing_session_ids(repo_root: Path) -> set[str]:
-    """Session ids already recorded in ``INDEX.yaml`` (empty set if none).
-
-    Read-only and fail-open: a missing, unreadable, or malformed index yields an
-    empty set. Used only for the advisory ``glue create`` warning when a
-    handoff's ``supersedes`` names a session not present in the index.
-    """
-    index_path = Path(repo_root) / AGENT_HISTORY_DIRNAME / INDEX_FILENAME
-    if not index_path.is_file():
-        return set()
-    try:
-        index = parse_mapping(index_path.read_text(encoding="utf-8"))
-    except (OSError, HandoffParseError):
-        return set()
-    sessions = index.get("sessions")
-    if not isinstance(sessions, list):
-        return set()
-    return {
-        s["session_id"]
-        for s in sessions
-        if isinstance(s, dict) and isinstance(s.get("session_id"), str)
-    }
-
-
 def close_session(repo_root: Path, session_id: str | None, status: str) -> str:
     """Set one session's ``status`` in ``INDEX.yaml`` and nothing else.
 

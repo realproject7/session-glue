@@ -263,7 +263,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
     # index. Unknown references never block the freeze — the referenced session
     # may live in another checkout or predate this index. Checked against the
     # pre-write index, so it compares only against prior sessions.
-    if handoff.supersedes and handoff.supersedes not in writer.existing_session_ids(repo_root):
+    if handoff.supersedes and handoff.supersedes not in reader.existing_session_ids(repo_root):
         print(
             f"glue create: WARNING: supersedes references unknown session id "
             f"{handoff.supersedes!r} (not in INDEX.yaml sessions[])",
