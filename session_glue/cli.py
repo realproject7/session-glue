@@ -16,7 +16,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, installer, reader, validator, writer
+from . import __version__, installer, leakscan, reader, validator, writer
 from .schema import (
     Handoff,
     HandoffParseError,
@@ -217,14 +217,33 @@ def _cmd_create(args: argparse.Namespace) -> int:
     print("Wrote handoff for session " + str(handoff.session_id) + ":")
     for label in ("archive", "latest", "resume_prompt", "index"):
         print(f"  {label}: {written[label]}")
+
+    # Advisory leak warnings: printed loudly but the freeze stays fail-open — a
+    # detected secret or personal path never blocks the write or changes rc.
+    warnings = leakscan.scan_handoff(text, repo_root)
+    for warning in warnings:
+        print(f"glue create: WARNING: {warning}", file=sys.stderr)
+    if warnings:
+        print(
+            f"glue create: {len(warnings)} leak warning(s) — review before "
+            "committing .agent-history/",
+            file=sys.stderr,
+        )
     return 0
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
     """Implement ``glue validate``."""
-    problems = validator.validate_history(
-        Path(args.repo_root), check_sessions=args.sessions
-    )
+    repo_root = Path(args.repo_root)
+    problems = validator.validate_history(repo_root, check_sessions=args.sessions)
+
+    # Advisory leak warnings from LATEST.md: printed as clearly-labeled warnings
+    # but never flip the exit code — only real validation problems do that.
+    latest = repo_root / ".agent-history" / "LATEST.md"
+    if latest.is_file():
+        for warning in leakscan.scan_handoff(latest.read_text(encoding="utf-8"), repo_root):
+            print(f"glue validate: WARNING: {warning}", file=sys.stderr)
+
     if problems:
         print("glue validate: found problems:", file=sys.stderr)
         for problem in problems:
