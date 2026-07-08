@@ -4,7 +4,9 @@ These commands orient the operator without recreating context bloat: ``status``
 reports compact metadata from ``INDEX.yaml`` plus a cheap validation summary —
 it deliberately does **not** read or print the full session narrative — and
 ``resume-prompt`` returns the exact contents of ``RESUME_PROMPT.txt``. Both are
-strictly read-only: no writes, no network, no subprocess.
+strictly read-only: no writes and no network. By default they run no subprocess
+either; a subprocess (git) runs only for the optional drift check behind the
+explicit ``glue status --git`` flag.
 """
 
 from __future__ import annotations

@@ -16,7 +16,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import __version__, installer, leakscan, reader, validator, writer
+from . import __version__, gitcheck, installer, leakscan, reader, validator, writer
 from .schema import (
     Handoff,
     HandoffParseError,
@@ -96,6 +96,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also validate archived session files under sessions/.",
     )
+    validate.add_argument(
+        "--git",
+        action="store_true",
+        help=(
+            "Opt-in git drift check: compare LATEST.md's recorded branch/commit "
+            "against the actual repo (runs git). Advisory warning only — never "
+            "changes the exit code. Default (no --git) runs no subprocess."
+        ),
+    )
     validate.set_defaults(func=_cmd_validate)
 
     status = subparsers.add_parser(
@@ -112,6 +121,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=".",
         metavar="PATH",
         help="Repository root that holds .agent-history/ (default: current directory).",
+    )
+    status.add_argument(
+        "--git",
+        action="store_true",
+        help=(
+            "Opt-in git drift check: compare INDEX.yaml's recorded branch/commit "
+            "against the actual repo (runs git). Advisory only. Default (no "
+            "--git) runs no subprocess."
+        ),
     )
     status.set_defaults(func=_cmd_status)
 
@@ -244,6 +262,24 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         for warning in leakscan.scan_handoff(latest.read_text(encoding="utf-8"), repo_root):
             print(f"glue validate: WARNING: {warning}", file=sys.stderr)
 
+    # Opt-in git drift check (advisory only, never flips the exit code). Runs a
+    # subprocess only when --git is passed.
+    if args.git:
+        handoff = None
+        if latest.is_file():
+            try:
+                handoff = Handoff.from_text(latest.read_text(encoding="utf-8"))
+            except HandoffParseError:
+                handoff = None
+        if handoff is None:
+            print("glue validate: --git: no readable LATEST.md to compare against",
+                  file=sys.stderr)
+        else:
+            for msg in gitcheck.check_git_drift(
+                repo_root, handoff.current_branch, handoff.head_commit
+            ):
+                print(f"glue validate: {msg}", file=sys.stderr)
+
     if problems:
         print("glue validate: found problems:", file=sys.stderr)
         for problem in problems:
@@ -272,6 +308,14 @@ def _cmd_status(args: argparse.Namespace) -> int:
             print(f"  - {problem}")
     else:
         print("validation: OK")
+
+    # Opt-in git drift check (advisory only). Runs a subprocess only with --git.
+    if args.git:
+        for msg in gitcheck.check_git_drift(
+            Path(args.repo_root), index.get("current_branch"), index.get("head_commit")
+        ):
+            print(f"git: {msg}")
+
     return 0
 
 
