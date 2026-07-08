@@ -74,20 +74,46 @@ def _validate_index(index_path: Path, latest: Handoff | None) -> list[str]:
             )
 
     latest_file = index.get("latest_file")
-    if isinstance(latest_file, str) and latest_file and not (history / latest_file).is_file():
-        problems.append(
-            f"{INDEX_FILENAME}.latest_file ({latest_file!r}) does not exist on disk"
-        )
+    if isinstance(latest_file, str) and latest_file:
+        resolved = _history_relative_path(history, latest_file)
+        if resolved is None:
+            problems.append(
+                f"{INDEX_FILENAME}.latest_file ({latest_file!r}) is outside "
+                f"{AGENT_HISTORY_DIRNAME}/"
+            )
+        elif not resolved.is_file():
+            problems.append(
+                f"{INDEX_FILENAME}.latest_file ({latest_file!r}) does not exist on disk"
+            )
 
     problems.extend(_validate_index_sessions(index.get("sessions"), history))
     return problems
 
 
+def _history_relative_path(history: Path, value: str) -> Path | None:
+    """Resolve an index file value under ``history``, or ``None`` if it escapes it.
+
+    ``INDEX.yaml`` file values must be relative paths that stay inside
+    ``.agent-history/``. An absolute path or a ``..`` escape is rejected
+    (returns ``None``) so a malformed/hostile index can neither probe files
+    outside the repo's ``.agent-history/`` nor silently pass by pointing the
+    existence check at an unrelated file that happens to exist.
+    """
+    if Path(value).is_absolute():
+        return None
+    candidate = (history / value).resolve()
+    hist = history.resolve()
+    if candidate == hist or hist in candidate.parents:
+        return candidate
+    return None
+
+
 def _validate_index_sessions(sessions: object, history: Path) -> list[str]:
     """Check that every ``sessions[]`` entry's ``file`` points at an existing file.
 
-    Malformed data (a non-list ``sessions``, a non-mapping entry, or a bad
-    ``file`` value) yields its own problem line rather than crashing validation.
+    Malformed data (a non-list ``sessions``, a non-mapping entry, a bad ``file``
+    value, or a ``file`` that escapes ``.agent-history/``) yields its own problem
+    line rather than crashing validation.
     """
     if sessions is None:
         return []
@@ -104,7 +130,14 @@ def _validate_index_sessions(sessions: object, history: Path) -> list[str]:
         entry_file = entry.get("file")
         if not isinstance(entry_file, str) or not entry_file:
             problems.append(f"{INDEX_FILENAME}.sessions[{i}].file is malformed ({entry_file!r})")
-        elif not (history / entry_file).is_file():
+            continue
+        resolved = _history_relative_path(history, entry_file)
+        if resolved is None:
+            problems.append(
+                f"{INDEX_FILENAME}.sessions[{i}].file ({entry_file!r}) is outside "
+                f"{AGENT_HISTORY_DIRNAME}/"
+            )
+        elif not resolved.is_file():
             problems.append(
                 f"{INDEX_FILENAME}.sessions[{i}].file ({entry_file!r}) does not exist on disk"
             )

@@ -175,6 +175,55 @@ def test_validate_reports_non_list_sessions_without_crashing(tmp_path, capsys):
     assert "sessions is not a list" in capsys.readouterr().err
 
 
+def test_validate_rejects_absolute_latest_file_even_if_it_exists(tmp_path, capsys):
+    # Security boundary: an absolute latest_file that points at an existing file
+    # outside .agent-history/ must be flagged, not silently pass the exists-check.
+    hist = _build_history(tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text("x", encoding="utf-8")
+    _rewrite_index(hist, lambda idx: idx.update(latest_file=str(outside)))
+    assert _validate(tmp_path) == 1
+    err = capsys.readouterr().err
+    assert "latest_file" in err
+    assert "outside .agent-history/" in err
+    assert "does not exist on disk" not in err
+
+
+def test_validate_rejects_dotdot_escape_in_latest_file(tmp_path, capsys):
+    hist = _build_history(tmp_path)
+    _rewrite_index(hist, lambda idx: idx.update(latest_file="../../etc/passwd"))
+    assert _validate(tmp_path) == 1
+    err = capsys.readouterr().err
+    assert "latest_file" in err
+    assert "outside .agent-history/" in err
+
+
+def test_validate_rejects_absolute_session_entry_file_even_if_it_exists(tmp_path, capsys):
+    hist = _build_history(tmp_path)
+    outside = tmp_path / "outside-session.md"
+    outside.write_text("x", encoding="utf-8")
+    _rewrite_index(
+        hist,
+        lambda idx: idx["sessions"].append({"session_id": "esc", "file": str(outside)}),
+    )
+    assert _validate(tmp_path) == 1
+    err = capsys.readouterr().err
+    assert "outside .agent-history/" in err
+    assert "does not exist on disk" not in err
+
+
+def test_validate_rejects_dotdot_escape_in_session_entry_file(tmp_path, capsys):
+    hist = _build_history(tmp_path)
+    _rewrite_index(
+        hist,
+        lambda idx: idx["sessions"].append(
+            {"session_id": "esc", "file": "../../../etc/passwd"}
+        ),
+    )
+    assert _validate(tmp_path) == 1
+    assert "outside .agent-history/" in capsys.readouterr().err
+
+
 def test_consistent_history_passes_all_cross_file_checks(tmp_path, capsys):
     # Negative case: an untouched, freshly created history satisfies every new
     # cross-file check with no problems reported.
