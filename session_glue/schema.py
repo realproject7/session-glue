@@ -394,6 +394,17 @@ class Handoff:
             if value is None or (isinstance(value, str) and len(value) == 0):
                 errors.append(f"required field is empty: {name}")
 
+        # Every next_todo_items entry must be a scalar (string or number). A
+        # mapping/list entry would otherwise render its Python repr — e.g.
+        # "{'task': 'do x'}" — into RESUME_PROMPT.txt and INDEX.first_next_action.
+        if isinstance(self.next_todo_items, list):
+            for idx, item in enumerate(self.next_todo_items):
+                if not isinstance(item, (str, int)):
+                    errors.append(
+                        f"next_todo_items[{idx}] must be a scalar (string or number), "
+                        f"not {type(item).__name__}"
+                    )
+
         if "next_todo_items" in self.present_fields:
             lint = lint_first_next_action(self.first_next_action)
             if lint:

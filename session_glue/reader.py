@@ -63,6 +63,36 @@ def collect_status(repo_root: Path, run_validation: bool = True) -> Status:
     return Status(exists=True, history_dir=history, index=index, problems=problems)
 
 
+def latest_status(index: dict[str, Any] | None) -> Any:
+    """Lifecycle ``status`` of the latest session recorded in ``INDEX.yaml``.
+
+    INDEX-only: reads the ``status`` of the ``sessions[]`` entry that matches
+    ``latest_session`` (falling back to the last entry). Never opens a session
+    narrative file — the token-economics/no-narrative rule still holds.
+    """
+    if not index:
+        return None
+    sessions = index.get("sessions")
+    if not isinstance(sessions, list):
+        return None
+    latest = index.get("latest_session")
+    for entry in sessions:
+        if isinstance(entry, dict) and entry.get("session_id") == latest:
+            return entry.get("status")
+    for entry in reversed(sessions):
+        if isinstance(entry, dict):
+            return entry.get("status")
+    return None
+
+
+def session_count(index: dict[str, Any] | None) -> int:
+    """Number of archived sessions recorded in ``INDEX.yaml`` (INDEX-only)."""
+    if not index:
+        return 0
+    sessions = index.get("sessions")
+    return len(sessions) if isinstance(sessions, list) else 0
+
+
 def read_resume_prompt(repo_root: Path) -> str | None:
     """Return the exact contents of ``RESUME_PROMPT.txt``, or None if missing."""
     path = Path(repo_root) / AGENT_HISTORY_DIRNAME / RESUME_PROMPT_FILENAME

@@ -180,6 +180,13 @@ def _read_input(source: str) -> str:
 
 def _cmd_create(args: argparse.Namespace) -> int:
     """Implement ``glue create``."""
+    # When defaulting to stdin at an interactive terminal, hint before blocking
+    # on the read. Piped stdin (a file/agent, not a TTY) is untouched.
+    if args.input == "-" and sys.stdin.isatty():
+        print(
+            "glue create: reading handoff from stdin — pipe a file or pass --input PATH",
+            file=sys.stderr,
+        )
     try:
         text = _read_input(args.input)
     except OSError as exc:
@@ -301,6 +308,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
     for label, key in reader.STATUS_FIELDS:
         value = index.get(key)
         print(f"{label}: {value if value not in (None, '') else '(unknown)'}")
+
+    # Lifecycle status of the latest session + a session count — both INDEX-only
+    # (the writer keeps per-session status inside sessions[]; no narrative read).
+    lifecycle = reader.latest_status(index)
+    print(f"status: {lifecycle if lifecycle not in (None, '') else '(unknown)'}")
+    print(f"sessions: {reader.session_count(index)}")
 
     if status.problems:
         print(f"validation: {len(status.problems)} problem(s)")

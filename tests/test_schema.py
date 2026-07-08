@@ -134,6 +134,35 @@ def test_lint_allows_productive_actions(item):
 
 
 # --------------------------------------------------------------------------- #
+# next_todo_items entries must be scalars (issue #40)
+# --------------------------------------------------------------------------- #
+
+
+def _with_todos(todos):
+    fields = {name: "x" for name in REQUIRED_FIELDS}
+    fields["next_todo_items"] = todos
+    return Handoff.from_frontmatter(fields)
+
+
+def test_next_todo_items_rejects_mapping_entry():
+    errors = _with_todos(["A productive task", {"task": "do x"}]).validate()
+    assert any("next_todo_items[1] must be a scalar" in e for e in errors)
+    assert any("not dict" in e for e in errors)
+
+
+def test_next_todo_items_rejects_list_entry():
+    errors = _with_todos(["A productive task", ["nested", "list"]]).validate()
+    assert any("next_todo_items[1] must be a scalar" in e for e in errors)
+    assert any("not list" in e for e in errors)
+
+
+def test_next_todo_items_accepts_scalar_entries():
+    # str and int entries must not trip the scalar-only check.
+    errors = _with_todos(["A productive task", 42]).validate()
+    assert not any("must be a scalar" in e for e in errors)
+
+
+# --------------------------------------------------------------------------- #
 # Issue #33 regression: bare-substring false positives vs real mechanics.
 # The lint must switch from bare substrings ("paste", "new session", "resume
 # prompt") to word-boundary mechanic verb+object phrases so ordinary work items

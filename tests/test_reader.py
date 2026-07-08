@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from session_glue import reader
 from session_glue.cli import main
 
 FIXTURES = Path(__file__).parent / "fixtures" / "handoffs"
@@ -57,6 +58,54 @@ def test_status_does_not_print_full_narrative(tmp_path, capsys):
     out = capsys.readouterr().out
     # Token-economics: the session narrative body must not be reproduced.
     assert "Detailed Session Briefing" not in out
+
+
+def test_status_reports_lifecycle_status_and_session_count(tmp_path, capsys):
+    _build_history(tmp_path)
+    capsys.readouterr()  # drop the setup `glue create` output
+    assert main(["status", "--repo-root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "status: in_progress" in out
+    assert "sessions: 1" in out
+
+
+def test_status_session_count_reflects_multiple_sessions(tmp_path, capsys):
+    _build_history(tmp_path)
+    second = VALID.replace(SESSION_ID, "2026-07-01-0900-second-session")
+    src = tmp_path / "in2.md"
+    src.write_text(second, encoding="utf-8")
+    assert main(["create", "--input", str(src), "--repo-root", str(tmp_path)]) == 0
+    capsys.readouterr()
+    main(["status", "--repo-root", str(tmp_path)])
+    assert "sessions: 2" in capsys.readouterr().out
+
+
+def test_status_lifecycle_and_count_are_index_only(tmp_path, capsys):
+    # Corrupt the archived session narrative; status is INDEX-only, so the
+    # lifecycle status and count must be unaffected (no session-file read).
+    hist = _build_history(tmp_path)
+    (hist / "sessions" / f"{SESSION_ID}.md").write_text("garbage, not a handoff\n", "utf-8")
+    capsys.readouterr()
+    assert main(["status", "--repo-root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "status: in_progress" in out
+    assert "sessions: 1" in out
+
+
+def test_reader_status_helpers_are_index_only():
+    index = {
+        "latest_session": "s2",
+        "sessions": [
+            {"session_id": "s1", "status": "done"},
+            {"session_id": "s2", "status": "in_progress"},
+        ],
+    }
+    assert reader.latest_status(index) == "in_progress"
+    assert reader.session_count(index) == 2
+    # Degrade gracefully on missing/malformed index data.
+    assert reader.latest_status(None) is None
+    assert reader.session_count(None) == 0
+    assert reader.session_count({"sessions": "oops-not-a-list"}) == 0
 
 
 def test_status_handles_missing_history(tmp_path, capsys):
