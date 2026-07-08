@@ -52,7 +52,9 @@ def test_no_args_prints_help_and_exits_zero(capsys):
     assert "usage" in out.lower()
 
 
-@pytest.mark.parametrize("command", ["create", "validate", "status", "resume-prompt", "install"])
+@pytest.mark.parametrize(
+    "command", ["create", "validate", "status", "resume-prompt", "close", "install"]
+)
 def test_subcommands_are_registered(command, capsys):
     with pytest.raises(SystemExit) as exc_info:
         main([command, "--help"])
@@ -63,6 +65,20 @@ def test_subcommands_are_registered(command, capsys):
 def test_parser_prog_name():
     parser = build_parser()
     assert parser.prog == "glue"
+
+
+def test_close_requires_status_flag():
+    # --status is required; argparse exits 2 before any repo is touched.
+    with pytest.raises(SystemExit) as exc_info:
+        main(["close", "--repo-root", "."])
+    assert exc_info.value.code == 2
+
+
+def test_close_rejects_invalid_status():
+    # Only DONE/BLOCKED/ABANDONED are accepted (argparse choices).
+    with pytest.raises(SystemExit) as exc_info:
+        main(["close", "--repo-root", ".", "--status", "MAYBE"])
+    assert exc_info.value.code == 2
 
 
 # --------------------------------------------------------------------------- #

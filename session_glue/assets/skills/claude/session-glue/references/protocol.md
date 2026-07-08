@@ -24,6 +24,18 @@ list to the frontmatter (scalars — decisions made this session); `glue create`
 one line per entry and never rewrites existing lines. On resume, after reading
 `LATEST.md`, also read `DECISIONS.md` if present — one line per decision, cheap to scan.
 
+`supersedes` is an optional frontmatter scalar naming the prior `session_id` this handoff
+replaces; when a handoff continues or replaces an earlier session, record it (when present
+it must be a non-empty scalar). It is mirrored into each `INDEX.yaml` session entry (empty
+string when absent), and `glue status` prints one single-hop `lineage:` line for the latest
+session when it is set.
+
+`glue close [--repo-root PATH] [--session ID] --status DONE|BLOCKED|ABANDONED` sets a
+session's lifecycle status in `INDEX.yaml` only (default: the latest session); archived
+`sessions/*.md` files and `LATEST.md` stay immutable. Closing the latest session as `DONE`
+clears the top-level `first_next_action`; `BLOCKED` and `ABANDONED` leave it unchanged. An
+unknown session id exits non-zero.
+
 ## Handoff Markdown
 
 `LATEST.md` and `sessions/<session_id>.md` must contain the same markdown
@@ -156,5 +168,6 @@ sessions:
     status: IN_PROGRESS
     primary_goal: One-line statement of the session's overall objective.
     search_tags: topic-tag, subsystem-name
+    supersedes: ""
     first_next_action: First productive action after the next agent reads the handoff.
 ```

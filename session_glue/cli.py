@@ -146,6 +146,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resume_prompt.set_defaults(func=_cmd_resume_prompt)
 
+    close = subparsers.add_parser(
+        "close",
+        help="Set a session's lifecycle status in INDEX.yaml (archives stay immutable).",
+        description=(
+            "Update only the selected session's status in INDEX.yaml — archived "
+            "sessions/*.md files and LATEST.md are never touched. Defaults to the "
+            "latest session. Closing the latest session as DONE clears the "
+            "pending top-level first_next_action; BLOCKED and ABANDONED leave it."
+        ),
+    )
+    close.add_argument(
+        "--repo-root",
+        default=".",
+        metavar="PATH",
+        help="Repository root that holds .agent-history/ (default: current directory).",
+    )
+    close.add_argument(
+        "--session",
+        default=None,
+        metavar="ID",
+        help="Session id to close (default: the latest session in INDEX.yaml).",
+    )
+    close.add_argument(
+        "--status",
+        required=True,
+        choices=writer.CLOSE_STATUSES,
+        help="New lifecycle status for the session.",
+    )
+    close.set_defaults(func=_cmd_close)
+
     install = subparsers.add_parser(
         "install",
         help="Show the managed instruction block for a coding agent (dry-run only).",
@@ -228,6 +258,17 @@ def _cmd_create(args: argparse.Namespace) -> int:
     if not repo_root.is_dir():
         print(f"glue create: repo root is not a directory: {repo_root}", file=sys.stderr)
         return 1
+
+    # Advisory (fail-open): warn when supersedes names a session not yet in the
+    # index. Unknown references never block the freeze — the referenced session
+    # may live in another checkout or predate this index. Checked against the
+    # pre-write index, so it compares only against prior sessions.
+    if handoff.supersedes and handoff.supersedes not in reader.existing_session_ids(repo_root):
+        print(
+            f"glue create: WARNING: supersedes references unknown session id "
+            f"{handoff.supersedes!r} (not in INDEX.yaml sessions[])",
+            file=sys.stderr,
+        )
 
     try:
         written = writer.create_handoff(
@@ -317,6 +358,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
     # Cheap file-line count of the append-only decisions log (0 when absent).
     print(f"decisions: {reader.decision_count(Path(args.repo_root))}")
 
+    # Single-hop supersession lineage for the latest session (INDEX-only). Only
+    # printed when the latest entry links to a prior session; never walks the chain.
+    prior = reader.latest_supersedes(index)
+    if prior is not None:
+        print(f"lineage: {index.get('latest_session')} <- supersedes {prior}")
+
     if status.problems:
         print(f"validation: {len(status.problems)} problem(s)")
         for problem in status.problems:
@@ -331,6 +378,17 @@ def _cmd_status(args: argparse.Namespace) -> int:
         ):
             print(f"git: {msg}")
 
+    return 0
+
+
+def _cmd_close(args: argparse.Namespace) -> int:
+    """Implement ``glue close`` — set a session's status in INDEX.yaml only."""
+    try:
+        closed = writer.close_session(Path(args.repo_root), args.session, args.status)
+    except writer.HandoffWriteError as exc:
+        print(f"glue close: {exc}", file=sys.stderr)
+        return 1
+    print(f"glue close: set session {closed} status to {args.status}")
     return 0
 
 

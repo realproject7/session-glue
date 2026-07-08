@@ -366,6 +366,11 @@ class Handoff:
     # Optional: durable decisions made this session (scalars). Absence is fine —
     # not a required field. Appended to the append-only DECISIONS.md log.
     decisions: list[Any] = field(default_factory=list)
+    # Optional: the prior session_id this handoff replaces (a scalar). Absence is
+    # fine; when present it must be a non-empty scalar. Mirrored into each
+    # INDEX.yaml session entry (empty string when absent) so session chains stay
+    # visible from the index alone.
+    supersedes: str | None = None
     body: str = ""
     # Keys actually present in the source frontmatter (drives presence checks).
     present_fields: frozenset[str] = field(default_factory=frozenset)
@@ -468,6 +473,17 @@ class Handoff:
                             f"not {type(item).__name__}"
                         )
 
+        # ``supersedes`` is optional: absence is fine. When present it names the
+        # prior session this handoff replaces and is mirrored verbatim into
+        # INDEX.yaml, so it must be a single non-empty scalar (an empty or
+        # non-scalar link would give the index a meaningless lineage value).
+        if "supersedes" in self.present_fields:
+            value = self.supersedes
+            if not isinstance(value, (str, int)) or (
+                isinstance(value, str) and not value.strip()
+            ):
+                errors.append("supersedes must be a non-empty scalar")
+
         if "next_todo_items" in self.present_fields:
             lint = lint_first_next_action(self.first_next_action)
             if lint:
@@ -517,9 +533,11 @@ def build_index_entry(handoff: Handoff) -> dict[str, Any]:
     """Build a compact ``INDEX.yaml`` session entry for a handoff.
 
     ``first_next_action`` mirrors ``next_todo_items[0]``; ``search_tags`` is
-    mirrored as a comma-joined scalar (see :func:`join_search_tags`). The full
-    ``next_todo_items`` list is intentionally omitted so the index does not
-    compete with the canonical handoff file.
+    mirrored as a comma-joined scalar (see :func:`join_search_tags`); optional
+    ``supersedes`` is mirrored as a scalar, using an empty string when absent to
+    preserve the scalar-only index constraint. The full ``next_todo_items`` list
+    is intentionally omitted so the index does not compete with the canonical
+    handoff file.
     """
     return {
         "session_id": handoff.session_id,
@@ -534,6 +552,7 @@ def build_index_entry(handoff: Handoff) -> dict[str, Any]:
         "status": handoff.status,
         "primary_goal": handoff.primary_goal,
         "search_tags": join_search_tags(handoff.search_tags),
+        "supersedes": handoff.supersedes if handoff.supersedes is not None else "",
         "first_next_action": handoff.first_next_action,
     }
 

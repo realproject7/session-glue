@@ -90,6 +90,26 @@ def latest_status(index: dict[str, Any] | None) -> Any:
     return None
 
 
+def latest_supersedes(index: dict[str, Any] | None) -> Any:
+    """The prior session the latest entry ``supersedes`` (INDEX-only), or None.
+
+    Single-hop: reads the ``supersedes`` link on the ``latest_session`` entry and
+    returns the referenced id, or None when it is absent/empty. Never walks the
+    chain recursively — v1 lineage is one hop only.
+    """
+    if not index:
+        return None
+    sessions = index.get("sessions")
+    if not isinstance(sessions, list):
+        return None
+    latest = index.get("latest_session")
+    for entry in sessions:
+        if isinstance(entry, dict) and entry.get("session_id") == latest:
+            value = entry.get("supersedes")
+            return value if value not in (None, "") else None
+    return None
+
+
 def session_count(index: dict[str, Any] | None) -> int:
     """Number of archived sessions recorded in ``INDEX.yaml`` (INDEX-only)."""
     if not index:
@@ -113,6 +133,30 @@ def decision_count(repo_root: Path) -> int:
     except OSError:
         return 0
     return sum(1 for line in text.splitlines() if line.startswith("- ["))
+
+
+def existing_session_ids(repo_root: Path) -> set[str]:
+    """Session ids already recorded in ``INDEX.yaml`` (empty set if none).
+
+    Read-only and fail-open: a missing, unreadable, or malformed index yields an
+    empty set. Used for the advisory ``glue create`` warning when a handoff's
+    ``supersedes`` names a session not present in the index.
+    """
+    index_path = Path(repo_root) / AGENT_HISTORY_DIRNAME / INDEX_FILENAME
+    if not index_path.is_file():
+        return set()
+    try:
+        index = parse_mapping(index_path.read_text(encoding="utf-8"))
+    except (OSError, HandoffParseError):
+        return set()
+    sessions = index.get("sessions")
+    if not isinstance(sessions, list):
+        return set()
+    return {
+        s["session_id"]
+        for s in sessions
+        if isinstance(s, dict) and isinstance(s.get("session_id"), str)
+    }
 
 
 def read_resume_prompt(repo_root: Path) -> str | None:
