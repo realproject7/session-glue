@@ -318,6 +318,52 @@ def test_non_list_decisions_fails():
 
 
 # --------------------------------------------------------------------------- #
+# Optional supersedes field (issue #45)
+# --------------------------------------------------------------------------- #
+
+
+def test_supersedes_field_is_optional():
+    # valid.md carries no supersedes and must still validate — absence is fine.
+    handoff = Handoff.from_text(_read("valid.md"))
+    assert "supersedes" not in handoff.present_fields
+    assert handoff.supersedes is None
+    assert handoff.validate() == []
+
+
+def test_scalar_supersedes_validates():
+    frontmatter = _valid_frontmatter()
+    frontmatter["supersedes"] = "2026-06-29-1000-prior-session"
+    handoff = Handoff.from_frontmatter(frontmatter)
+    assert handoff.validate() == []
+    assert handoff.supersedes == "2026-06-29-1000-prior-session"
+
+
+def test_empty_supersedes_fails_with_clear_error():
+    frontmatter = _valid_frontmatter()
+    frontmatter["supersedes"] = ""
+    errors = Handoff.from_frontmatter(frontmatter).validate()
+    assert any("supersedes must be a non-empty scalar" in e for e in errors)
+
+
+def test_non_scalar_supersedes_fails_with_clear_error():
+    frontmatter = _valid_frontmatter()
+    frontmatter["supersedes"] = ["2026-06-29-1000-prior"]
+    errors = Handoff.from_frontmatter(frontmatter).validate()
+    assert any("supersedes must be a non-empty scalar" in e for e in errors)
+
+
+def test_index_entry_mirrors_supersedes_scalar():
+    # Present -> mirrored verbatim as a scalar.
+    frontmatter = _valid_frontmatter()
+    frontmatter["supersedes"] = "2026-06-29-1000-prior-session"
+    entry = build_index_entry(Handoff.from_frontmatter(frontmatter))
+    assert entry["supersedes"] == "2026-06-29-1000-prior-session"
+    # Absent -> empty string (preserves the scalar-only index constraint).
+    entry_absent = build_index_entry(Handoff.from_text(_read("valid.md")))
+    assert entry_absent["supersedes"] == ""
+
+
+# --------------------------------------------------------------------------- #
 # Derived artifacts
 # --------------------------------------------------------------------------- #
 

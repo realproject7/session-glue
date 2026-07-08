@@ -90,6 +90,26 @@ def latest_status(index: dict[str, Any] | None) -> Any:
     return None
 
 
+def latest_supersedes(index: dict[str, Any] | None) -> Any:
+    """The prior session the latest entry ``supersedes`` (INDEX-only), or None.
+
+    Single-hop: reads the ``supersedes`` link on the ``latest_session`` entry and
+    returns the referenced id, or None when it is absent/empty. Never walks the
+    chain recursively — v1 lineage is one hop only.
+    """
+    if not index:
+        return None
+    sessions = index.get("sessions")
+    if not isinstance(sessions, list):
+        return None
+    latest = index.get("latest_session")
+    for entry in sessions:
+        if isinstance(entry, dict) and entry.get("session_id") == latest:
+            value = entry.get("supersedes")
+            return value if value not in (None, "") else None
+    return None
+
+
 def session_count(index: dict[str, Any] | None) -> int:
     """Number of archived sessions recorded in ``INDEX.yaml`` (INDEX-only)."""
     if not index:

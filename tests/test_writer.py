@@ -395,3 +395,132 @@ def test_create_does_not_write_outside_agent_history(tmp_path):
     # Only the input file and .agent-history/ exist at the repo root.
     top_level = sorted(p.name for p in tmp_path.iterdir())
     assert top_level == [".agent-history", "handoff-in.md"]
+
+
+# --------------------------------------------------------------------------- #
+# Supersession links + glue close (issue #45)
+# --------------------------------------------------------------------------- #
+
+
+def _with_supersedes(text: str, prior_id: str) -> str:
+    """Inject a ``supersedes:`` line into a handoff's frontmatter."""
+    return text.replace(
+        "status: in_progress\n", f"status: in_progress\nsupersedes: {prior_id}\n", 1
+    )
+
+
+def test_supersedes_mirrored_into_index_entry(tmp_path):
+    # First session has no supersedes -> mirrors an empty string.
+    assert _create(tmp_path, VALID) == 0
+    second_id = "2026-07-01-0900-second-session"
+    second = _with_supersedes(VALID.replace(SESSION_ID, second_id), SESSION_ID)
+    assert _create(tmp_path, second) == 0
+
+    index = parse_mapping((_history(tmp_path) / "INDEX.yaml").read_text(encoding="utf-8"))
+    entries = {s["session_id"]: s for s in index["sessions"]}
+    assert entries[SESSION_ID]["supersedes"] == ""
+    assert entries[second_id]["supersedes"] == SESSION_ID
+
+
+def test_unknown_supersedes_warns_but_still_writes(tmp_path, capsys):
+    text = _with_supersedes(VALID, "2020-01-01-0000-does-not-exist")
+    rc = _create(tmp_path, text)
+    assert rc == 0  # fail-open: an unknown reference never blocks the freeze
+    err = capsys.readouterr().err
+    assert "supersedes references unknown session id" in err
+    assert (_history(tmp_path) / "LATEST.md").is_file()
+
+
+def test_known_supersedes_does_not_warn(tmp_path, capsys):
+    assert _create(tmp_path, VALID) == 0
+    capsys.readouterr()
+    second = _with_supersedes(VALID.replace(SESSION_ID, "2026-07-01-second"), SESSION_ID)
+    assert _create(tmp_path, second) == 0
+    assert "unknown session id" not in capsys.readouterr().err
+
+
+def test_close_updates_status_in_index_only(tmp_path):
+    assert _create(tmp_path, VALID) == 0
+    hist = _history(tmp_path)
+    archive = hist / "sessions" / f"{SESSION_ID}.md"
+    before_archive = archive.read_bytes()
+    before_latest = (hist / "LATEST.md").read_bytes()
+
+    assert main(["close", "--repo-root", str(tmp_path), "--status", "DONE"]) == 0
+
+    index = parse_mapping((hist / "INDEX.yaml").read_text(encoding="utf-8"))
+    entry = index["sessions"][0]
+    assert entry["session_id"] == SESSION_ID
+    assert entry["status"] == "DONE"
+    # Archives are immutable: archive + LATEST.md bytes are untouched.
+    assert archive.read_bytes() == before_archive
+    assert (hist / "LATEST.md").read_bytes() == before_latest
+
+
+def test_close_unknown_session_errors(tmp_path, capsys):
+    assert _create(tmp_path, VALID) == 0
+    rc = main(
+        ["close", "--repo-root", str(tmp_path), "--session", "no-such-session", "--status", "DONE"]
+    )
+    assert rc == 1
+    assert "unknown session id" in capsys.readouterr().err
+
+
+def test_close_defaults_to_latest_session(tmp_path):
+    assert _create(tmp_path, VALID) == 0
+    second_id = "2026-07-01-0900-second-session"
+    assert _create(tmp_path, VALID.replace(SESSION_ID, second_id)) == 0
+    assert main(["close", "--repo-root", str(tmp_path), "--status", "BLOCKED"]) == 0
+
+    index = parse_mapping((_history(tmp_path) / "INDEX.yaml").read_text(encoding="utf-8"))
+    entries = {s["session_id"]: s for s in index["sessions"]}
+    # Only the latest session's status changed; the earlier one is untouched.
+    assert entries[second_id]["status"] == "BLOCKED"
+    assert entries[SESSION_ID]["status"] == "in_progress"
+
+
+def test_close_done_clears_first_next_action(tmp_path):
+    assert _create(tmp_path, VALID) == 0
+    before = parse_mapping((_history(tmp_path) / "INDEX.yaml").read_text(encoding="utf-8"))
+    assert before["first_next_action"]  # non-empty before close
+
+    assert main(["close", "--repo-root", str(tmp_path), "--status", "DONE"]) == 0
+    index = parse_mapping((_history(tmp_path) / "INDEX.yaml").read_text(encoding="utf-8"))
+    assert index["first_next_action"] == ""
+
+
+def test_close_blocked_keeps_first_next_action(tmp_path):
+    assert _create(tmp_path, VALID) == 0
+    expected = parse_mapping(
+        (_history(tmp_path) / "INDEX.yaml").read_text(encoding="utf-8")
+    )["first_next_action"]
+    assert main(["close", "--repo-root", str(tmp_path), "--status", "BLOCKED"]) == 0
+    index = parse_mapping((_history(tmp_path) / "INDEX.yaml").read_text(encoding="utf-8"))
+    assert index["first_next_action"] == expected
+
+
+def test_close_no_index_errors(tmp_path, capsys):
+    rc = main(["close", "--repo-root", str(tmp_path), "--status", "DONE"])
+    assert rc == 1
+    assert "no INDEX.yaml" in capsys.readouterr().err
+
+
+def test_close_symlinked_index_is_rejected(tmp_path):
+    repo, outside = _repo_and_outside(tmp_path)
+    assert _create_in(repo, VALID) == 0
+    index_path = repo / ".agent-history" / "INDEX.yaml"
+    stolen = outside / "stolen-index.yaml"
+    index_path.unlink()
+    index_path.symlink_to(stolen)
+    rc = main(["close", "--repo-root", str(repo), "--status", "DONE"])
+    assert rc == 1
+    # Nothing was written through the symlink into the outside directory.
+    assert not stolen.exists()
+
+
+def test_close_symlinked_history_dir_is_rejected(tmp_path):
+    repo, outside = _repo_and_outside(tmp_path)
+    (repo / ".agent-history").symlink_to(outside, target_is_directory=True)
+    rc = main(["close", "--repo-root", str(repo), "--status", "DONE"])
+    assert rc == 1
+    assert list(outside.iterdir()) == []

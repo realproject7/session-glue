@@ -150,6 +150,56 @@ def test_decision_count_reads_only_the_decisions_file(tmp_path):
     assert reader.decision_count(tmp_path) == 2  # only '- [' lines counted
 
 
+# --------------------------------------------------------------------------- #
+# Supersession lineage (issue #45)
+# --------------------------------------------------------------------------- #
+
+PRIOR_ID = SESSION_ID
+LATEST_ID = "2026-07-01-0900-successor"
+
+
+def _build_supersede_chain(repo: Path) -> None:
+    _build_history(repo)  # first session (PRIOR_ID), no supersedes
+    successor = VALID.replace(SESSION_ID, LATEST_ID).replace(
+        "status: in_progress\n", f"status: in_progress\nsupersedes: {PRIOR_ID}\n", 1
+    )
+    src = repo / "in2.md"
+    src.write_text(successor, encoding="utf-8")
+    assert main(["create", "--input", str(src), "--repo-root", str(repo)]) == 0
+
+
+def test_status_prints_lineage_when_supersedes_present(tmp_path, capsys):
+    _build_supersede_chain(tmp_path)
+    capsys.readouterr()  # drop the setup output
+    assert main(["status", "--repo-root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert f"lineage: {LATEST_ID} <- supersedes {PRIOR_ID}" in out
+
+
+def test_status_omits_lineage_when_absent(tmp_path, capsys):
+    _build_history(tmp_path)  # valid.md has no supersedes
+    capsys.readouterr()
+    assert main(["status", "--repo-root", str(tmp_path)]) == 0
+    assert "lineage:" not in capsys.readouterr().out
+
+
+def test_latest_supersedes_helper_is_index_only():
+    index = {
+        "latest_session": "s2",
+        "sessions": [
+            {"session_id": "s1", "supersedes": ""},
+            {"session_id": "s2", "supersedes": "s1"},
+        ],
+    }
+    assert reader.latest_supersedes(index) == "s1"
+    # An empty-string link on the latest entry reads as no lineage.
+    index["sessions"][1]["supersedes"] = ""
+    assert reader.latest_supersedes(index) is None
+    # Degrade gracefully on missing/malformed index data.
+    assert reader.latest_supersedes(None) is None
+    assert reader.latest_supersedes({"sessions": "oops-not-a-list"}) is None
+
+
 def test_status_handles_missing_history(tmp_path, capsys):
     code = main(["status", "--repo-root", str(tmp_path)])
     assert code == 1

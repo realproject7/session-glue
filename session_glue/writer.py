@@ -45,6 +45,9 @@ DECISIONS_HEADER = (
 
 _UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
+# Lifecycle statuses accepted by ``glue close`` (INDEX-only session state).
+CLOSE_STATUSES: tuple[str, ...] = ("DONE", "BLOCKED", "ABANDONED")
+
 
 class HandoffWriteError(Exception):
     """Raised when a handoff cannot be written safely (e.g. a symlink escape)."""
@@ -161,6 +164,85 @@ def build_index(existing: dict | None, handoff: Handoff, archive_file: str) -> d
         "first_next_action": handoff.first_next_action,
         "sessions": sessions,
     }
+
+
+def existing_session_ids(repo_root: Path) -> set[str]:
+    """Session ids already recorded in ``INDEX.yaml`` (empty set if none).
+
+    Read-only and fail-open: a missing, unreadable, or malformed index yields an
+    empty set. Used only for the advisory ``glue create`` warning when a
+    handoff's ``supersedes`` names a session not present in the index.
+    """
+    index_path = Path(repo_root) / AGENT_HISTORY_DIRNAME / INDEX_FILENAME
+    if not index_path.is_file():
+        return set()
+    try:
+        index = parse_mapping(index_path.read_text(encoding="utf-8"))
+    except (OSError, HandoffParseError):
+        return set()
+    sessions = index.get("sessions")
+    if not isinstance(sessions, list):
+        return set()
+    return {
+        s["session_id"]
+        for s in sessions
+        if isinstance(s, dict) and isinstance(s.get("session_id"), str)
+    }
+
+
+def close_session(repo_root: Path, session_id: str | None, status: str) -> str:
+    """Set one session's ``status`` in ``INDEX.yaml`` and nothing else.
+
+    INDEX-only: archived ``sessions/*.md`` and ``LATEST.md`` are never touched.
+    Defaults to ``latest_session`` when ``session_id`` is None. Closing the
+    latest session as ``DONE`` clears the top-level ``first_next_action`` (a done
+    session has no pending next action); ``BLOCKED`` and ``ABANDONED`` leave it.
+    The read/modify/write goes through the ``parse_mapping``/``dump_mapping``
+    round-trip and keeps the INDEX symlink guard. Returns the closed session id;
+    raises :class:`HandoffWriteError` for a missing/symlinked/unparseable INDEX,
+    a malformed session list, or an unknown session id.
+    """
+    history_dir = Path(repo_root) / AGENT_HISTORY_DIRNAME
+    index_path = history_dir / INDEX_FILENAME
+    # Same symlink guard the create path uses: refuse to follow a symlinked
+    # history dir or INDEX.yaml that could redirect the write outside repo_root.
+    _reject_symlink(history_dir)
+    _reject_symlink(index_path)
+    if not index_path.is_file():
+        raise HandoffWriteError(f"no INDEX.yaml to update at {index_path}")
+    try:
+        index = parse_mapping(index_path.read_text(encoding="utf-8"))
+    except (OSError, HandoffParseError) as exc:
+        raise HandoffWriteError(f"cannot read INDEX.yaml at {index_path}: {exc}") from exc
+
+    sessions = index.get("sessions")
+    if not isinstance(sessions, list):
+        raise HandoffWriteError(f"INDEX.yaml has no sessions[] to update at {index_path}")
+
+    target = session_id if session_id is not None else index.get("latest_session")
+    if target is None or (isinstance(target, str) and not target.strip()):
+        raise HandoffWriteError(
+            "no --session given and INDEX.yaml has no latest_session to default to"
+        )
+
+    entry = next(
+        (s for s in sessions if isinstance(s, dict) and s.get("session_id") == target),
+        None,
+    )
+    if entry is None:
+        raise HandoffWriteError(
+            f"unknown session id {target!r}: not found in INDEX.yaml sessions[]"
+        )
+
+    entry["status"] = status
+    # Only a DONE-closed *latest* session clears the pending next action; the
+    # index's top-level first_next_action mirrors the latest session, and a done
+    # session has nothing left to resume. BLOCKED/ABANDONED keep it for triage.
+    if status == "DONE" and index.get("latest_session") == target:
+        index["first_next_action"] = ""
+
+    index_path.write_text(dump_mapping(index) + "\n", encoding="utf-8")
+    return str(target)
 
 
 def _decision_line(handoff: Handoff, decision: object) -> str:
