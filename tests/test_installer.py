@@ -58,7 +58,7 @@ def test_has_managed_block_detects_fixtures():
     "agent,target",
     [
         ("codex", "~/.codex/AGENTS.md"),
-        ("claude", "~/.claude/commands/glue.md"),
+        ("claude", "~/.claude/skills/session-glue/"),
         ("cursor", "~/.cursor/rules/session-glue.md"),
         ("gemini", "~/.gemini/GEMINI.md"),
     ],
@@ -92,6 +92,15 @@ def test_legacy_install_mentions_skill_install_successor(capsys):
     assert main(["install", "codex", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert "glue skill install" in out
+
+
+def test_legacy_claude_target_is_skills_first_with_recommended_default(capsys):
+    # The stale ~/.claude/commands/glue.md target was replaced by the skills-first
+    # path, with a note that the repo-scoped folder is the recommended default.
+    assert main(["install", "claude", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "~/.claude/skills/session-glue/" in out
+    assert "repo-scoped .claude/skills/session-glue/ is the recommended default" in out
 
 
 def test_unknown_agent_is_rejected():

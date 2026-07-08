@@ -204,9 +204,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install, inspect, or remove bundled agent skill folders.",
         description=(
             "Manage dedicated agent skill folders bundled with Session Glue. "
-            "Installs the bundled skill into .agents/skills/session-glue/ (repo "
-            "or user scope) — it never edits AGENTS.md or any global instruction "
-            "file, and never writes outside that folder."
+            "Installs the bundled skill into the agent's dedicated skill folder "
+            "(repo or user scope) — it never edits AGENTS.md, CLAUDE.md, or any "
+            "global instruction file, and never writes outside that folder."
         ),
     )
     skill_sub = skill.add_subparsers(dest="skill_command", metavar="<subcommand>", required=True)
@@ -235,7 +235,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install a bundled agent skill folder.",
         description=(
             "Copy the bundled agent skill (SKILL.md and its supporting files) "
-            "into .agents/skills/session-glue/ under the repo or user scope."
+            "into the agent's dedicated skill folder (Codex .agents/..., Claude "
+            ".claude/...) under the repo or user scope."
         ),
     )
     skill_install.add_argument("agent", choices=skills.SUPPORTED_AGENTS)
@@ -267,8 +268,9 @@ def build_parser() -> argparse.ArgumentParser:
         "uninstall",
         help="Remove an installed agent skill folder (managed files only).",
         description=(
-            "Remove the managed skill files from .agents/skills/session-glue/ and "
-            "the folder itself when empty. Refuses if unmanaged files are present."
+            "Remove the managed skill files from the agent's dedicated skill "
+            "folder and the folder itself when empty. Refuses if unmanaged files "
+            "are present."
         ),
     )
     skill_uninstall.add_argument("agent", choices=skills.SUPPORTED_AGENTS)
@@ -573,8 +575,8 @@ def _cmd_skill_show(args: argparse.Namespace) -> int:
     """Implement ``glue skill show <agent>``."""
     agent = args.agent
     print(f"agent: {agent}")
-    print(f"repo target: {skills.skill_target('repo', args.repo_root)}")
-    print(f"user target: {skills.skill_target('user')}")
+    print(f"repo target: {skills.skill_target(agent, 'repo', args.repo_root)}")
+    print(f"user target: {skills.skill_target(agent, 'user')}")
     state = "present" if skills.bundle_present(agent) else "MISSING"
     print(f"bundled skill: {state}")
     print("--- SKILL.md ---")
