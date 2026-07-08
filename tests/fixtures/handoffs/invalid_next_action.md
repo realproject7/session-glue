@@ -9,6 +9,7 @@ current_branch: main
 head_commit: abc1234
 agent: codex
 status: in_progress
+primary_goal: Ship the chart polling lifecycle with clean teardown
 active_context_files:
   - path: src/components/ChartView.tsx
     reason: "Main implementation target"
@@ -19,6 +20,13 @@ next_todo_items:
   - "Add polling lifecycle with cleanup"
 known_issues:
   - "Y-axis scaling breaks when data is empty"
+search_tags:
+  - charts
+  - polling
+validation:
+  - command: npm test
+    result: passed
+    notes: "Unit suite green"
 ---
 
 # Resume Prompt

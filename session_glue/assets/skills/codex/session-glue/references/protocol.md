@@ -34,14 +34,26 @@ current_branch: main
 head_commit: abc1234
 agent: codex
 status: IN_PROGRESS
+primary_goal: One-line statement of the session's overall objective.
 active_context_files:
-  - path/to/file.py
+  - path: path/to/file.py
+    reason: Why this file matters to the next agent.
 completed_tasks:
   - Concrete completed work item.
 next_todo_items:
   - First productive action after the next agent reads the handoff.
 known_issues:
   - Known blocker or risk.
+search_tags:
+  - topic-tag
+  - subsystem-name
+validation:
+  - command: pytest -q
+    result: passed
+    notes: Full suite green.
+  - command: ruff check .
+    result: not_run
+    notes: Deferred to the next session.
 ```
 
 Values must be single-line, and inline `#` comments after values are treated as comments.
@@ -50,6 +62,18 @@ Canonicalization: `glue create` re-serializes this frontmatter when it archives 
 handoff. Comments are dropped, quoting is normalized, and only single-line values are
 supported. Write the frontmatter accordingly — do not rely on comments or multi-line
 values surviving the round-trip.
+
+Required quality fields:
+
+- `primary_goal` — a single-line statement of the session's overall objective.
+- `active_context_files` — each entry is preferably a `path:`/`reason:` mapping; the
+  `reason` tells the next agent why the file matters, so it need not re-read the whole
+  file. A bare path scalar is still accepted for backward compatibility.
+- `search_tags` — one or more short topical tags (at least one) so a later session can
+  find this handoff from `INDEX.yaml` alone.
+- `validation` — one or more `command:`/`result:`/`notes:` mappings recording how the
+  work was checked. `result` must be one of `passed`, `failed`, or `not_run`; use
+  `not_run` to record a defined-but-skipped check rather than omitting it.
 
 The first entry, next_todo_items[0], must be productive work, not resume mechanics. Do not use
 phrases such as "paste the prompt", "start a new session", "read LATEST.md",
@@ -109,6 +133,8 @@ latest_file: sessions/2026-07-01-1200-short-slug.md
 repo_root: /path/to/project
 current_branch: main
 head_commit: abc1234
+primary_goal: One-line statement of the session's overall objective.
+search_tags: topic-tag, subsystem-name
 first_next_action: First productive action after the next agent reads the handoff.
 sessions:
   - session_id: 2026-07-01-1200-short-slug
@@ -121,5 +147,7 @@ sessions:
     current_branch: main
     head_commit: abc1234
     status: IN_PROGRESS
+    primary_goal: One-line statement of the session's overall objective.
+    search_tags: topic-tag, subsystem-name
     first_next_action: First productive action after the next agent reads the handoff.
 ```
