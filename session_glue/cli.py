@@ -213,20 +213,6 @@ def _read_input(source: str) -> str:
 OVERUSE_WINDOW = timedelta(minutes=30)
 
 
-def _parse_iso8601(value: object) -> "datetime | None":
-    """Parse an ISO-8601 timestamp, tolerating a trailing ``Z``. None on failure.
-
-    Used only for the advisory freeze-overuse comparison, so any bad/missing
-    value degrades to None (skip the check) rather than raising.
-    """
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
 def _cmd_create(args: argparse.Namespace) -> int:
     """Implement ``glue create``."""
     # When defaulting to stdin at an interactive terminal, hint before blocking
@@ -302,8 +288,15 @@ def _cmd_create(args: argparse.Namespace) -> int:
             ).generated_at
         except (OSError, HandoffParseError):
             prior_generated_at = None
-        prev_ts = _parse_iso8601(prior_generated_at)
-        curr_ts = _parse_iso8601(handoff.generated_at)
+        # Parse both ISO-8601 timestamps inline (tolerating a trailing ``Z``); a
+        # missing or unparseable value becomes None so the comparison is skipped.
+        parsed: list = []
+        for raw in (prior_generated_at, handoff.generated_at):
+            try:
+                parsed.append(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+            except (AttributeError, TypeError, ValueError):
+                parsed.append(None)
+        prev_ts, curr_ts = parsed
         if prev_ts is not None and curr_ts is not None:
             try:
                 elapsed = curr_ts - prev_ts
