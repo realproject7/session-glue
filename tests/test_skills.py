@@ -70,8 +70,9 @@ def test_skill_show_prints_targets_and_bundled_skill_md(tmp_path, capsys):
     out = capsys.readouterr().out
     assert f"repo target: {_target(tmp_path)}" in out
     assert "user target:" in out
-    # The full bundled SKILL.md is echoed verbatim.
-    assert _bundle_bytes("codex", "SKILL.md").decode("utf-8") in out
+    # The full bundled SKILL.md is echoed. Compare via the same read_text path the
+    # CLI uses (not raw bytes) so a CRLF checkout on Windows still matches.
+    assert skills.bundled_skill_md("codex") in out
 
 
 # --------------------------------------------------------------------------- #
