@@ -11,8 +11,10 @@ Backs ``glue validate``. Checks that the handoff artifacts written by
 - optionally, archived session files under ``sessions/`` validate too
 
 It returns a list of human-readable problems; an empty list means valid. No
-network, no subprocess, no LLM — the ``next_todo_items[0]`` guard is the
-conservative phrase heuristic from :mod:`session_glue.schema`.
+network and no LLM — the ``next_todo_items[0]`` guard is the conservative phrase
+heuristic from :mod:`session_glue.schema`. Validation itself runs no subprocess;
+a subprocess (git) runs only for the optional drift check behind the explicit
+``glue validate --git`` flag, which is advisory and never changes the result.
 """
 
 from __future__ import annotations
