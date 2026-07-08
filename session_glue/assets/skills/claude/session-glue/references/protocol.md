@@ -71,9 +71,10 @@ Required quality fields:
   file. A bare path scalar is still accepted for backward compatibility.
 - `search_tags` — one or more short topical tags (at least one) so a later session can
   find this handoff from `INDEX.yaml` alone.
-- `validation` — one or more `command:`/`result:`/`notes:` mappings recording how the
-  work was checked. `result` must be one of `passed`, `failed`, or `not_run`; use
-  `not_run` to record a defined-but-skipped check rather than omitting it.
+- `validation` — one or more mappings recording how the work was checked; each entry
+  requires all of `command:`, `result:`, and `notes:`. `result` must be one of
+  `passed`, `failed`, or `not_run`; use `not_run` (with a note saying why) to record a
+  defined-but-skipped check rather than omitting it.
 
 The first entry, next_todo_items[0], must be productive work, not resume mechanics. Do not use
 phrases such as "paste the prompt", "start a new session", "read LATEST.md",

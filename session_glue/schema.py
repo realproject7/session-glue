@@ -447,6 +447,13 @@ class Handoff:
                         f"validation[{idx}].result must be one of "
                         f"passed/failed/not_run, got {result!r}"
                     )
+                notes = item.get("notes")
+                if not isinstance(notes, (str, int)) or (
+                    isinstance(notes, str) and not notes.strip()
+                ):
+                    errors.append(
+                        f"validation[{idx}].notes is required and must be a non-empty scalar"
+                    )
 
         if "next_todo_items" in self.present_fields:
             lint = lint_first_next_action(self.first_next_action)
