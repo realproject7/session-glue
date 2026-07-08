@@ -102,6 +102,16 @@ def test_no_drift_when_recorded_is_full_sha(tmp_path):
     assert gitcheck.check_git_drift(tmp_path, branch, full) == []
 
 
+def test_drift_when_recorded_full_sha_is_a_different_commit(tmp_path):
+    # A full 40-char SHA that is NOT the current HEAD must still be reported as
+    # drift (the fix must not over-correct into ignoring real commit drift).
+    _init_repo(tmp_path)
+    branch, _ = _actual(tmp_path)
+    other_full_sha = "0" * 40  # valid length, definitely not HEAD
+    messages = gitcheck.check_git_drift(tmp_path, branch, other_full_sha)
+    assert any(m.startswith("drift:") for m in messages)
+
+
 # --------------------------------------------------------------------------- #
 # CLI: status --git / validate --git (advisory, warning-only)
 # --------------------------------------------------------------------------- #
