@@ -20,9 +20,11 @@ from pathlib import Path
 
 from .schema import (
     Handoff,
+    HandoffParseError,
     build_index_entry,
     build_resume_prompt,
     dump_mapping,
+    parse_frontmatter,
     parse_mapping,
 )
 
@@ -48,6 +50,39 @@ def _reject_symlink(path: Path) -> None:
     """
     if path.is_symlink():
         raise HandoffWriteError(f"refusing to write through a symlink: {path}")
+
+
+def _reject_archive_collision(archive_path: Path, incoming_session_id: str | None) -> None:
+    """Fail loud if ``archive_path`` already holds a *different* session.
+
+    Two distinct ``session_id`` values can slugify to the same archive base name
+    (e.g. ``team/alpha`` and ``team-alpha`` -> ``team-alpha.md``). Overwriting the
+    file would silently destroy the first session while leaving a dangling
+    ``INDEX.yaml`` entry pointing at it. Re-creating the *same* ``session_id`` is
+    still allowed (idempotent re-freeze). An existing archive we cannot parse (or
+    that has no usable ``session_id``) is treated as a conflict too — we never
+    silently clobber it. Called before any directory/file is written.
+    """
+    if not archive_path.exists():
+        return
+    try:
+        existing_frontmatter, _ = parse_frontmatter(archive_path.read_text(encoding="utf-8"))
+    except (OSError, HandoffParseError) as exc:
+        raise HandoffWriteError(
+            f"refusing to overwrite an unreadable archive at {archive_path}: {exc}"
+        ) from exc
+
+    existing_id = existing_frontmatter.get("session_id")
+    if existing_id is None or (isinstance(existing_id, str) and not existing_id.strip()):
+        raise HandoffWriteError(
+            f"refusing to overwrite an archive with no session_id at {archive_path}"
+        )
+    if existing_id != incoming_session_id:
+        raise HandoffWriteError(
+            f"archive name collision at {archive_path}: it already holds session "
+            f"{existing_id!r}, but session {incoming_session_id!r} slugifies to the "
+            f"same file. Rename one session_id so the archives do not collide."
+        )
 
 
 def _assert_within(path: Path, root_resolved: Path) -> None:
@@ -148,6 +183,11 @@ def create_handoff(
     _reject_symlink(sessions_dir)
     for path in (archive_path, latest_path, resume_path, index_path):
         _reject_symlink(path)
+
+    # Refuse to silently overwrite a different session that slugified to the same
+    # archive name. Runs before any mkdir/write so a rejected collision leaves the
+    # existing archive, LATEST.md, and INDEX.yaml completely untouched.
+    _reject_archive_collision(archive_path, handoff.session_id)
 
     sessions_dir.mkdir(parents=True, exist_ok=True)
 
