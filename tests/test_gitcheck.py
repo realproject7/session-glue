@@ -90,6 +90,18 @@ def test_short_hash_compared_on_recorded_length(tmp_path):
     assert gitcheck.check_git_drift(tmp_path, branch, short[:4]) == []
 
 
+def test_no_drift_when_recorded_is_full_sha(tmp_path):
+    # A handoff that recorded the full 40-char HEAD SHA must not drift against
+    # the same commit (regression: comparing a --short value would false-positive).
+    _init_repo(tmp_path)
+    branch, _ = _actual(tmp_path)
+    full = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    assert len(full) == 40
+    assert gitcheck.check_git_drift(tmp_path, branch, full) == []
+
+
 # --------------------------------------------------------------------------- #
 # CLI: status --git / validate --git (advisory, warning-only)
 # --------------------------------------------------------------------------- #

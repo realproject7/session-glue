@@ -61,7 +61,11 @@ def check_git_drift(
     These are warnings only: callers must not let them change an exit code.
     """
     actual_branch = _run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
-    actual_commit = _run_git(repo_root, ["rev-parse", "--short", "HEAD"])
+    # Fetch the FULL 40-char SHA, then compare on the recorded hash's length.
+    # Using ``--short`` here would false-positive when the handoff recorded a full
+    # SHA (a 7-char actual value never prefix-matches a 40-char recorded one),
+    # while the full SHA prefix-matches both a short and a full recorded value.
+    actual_commit = _run_git(repo_root, ["rev-parse", "HEAD"])
     if actual_branch is None or actual_commit is None:
         return [GIT_UNAVAILABLE]
 
@@ -89,8 +93,11 @@ def check_git_drift(
         commit_drift = True
 
     if branch_drift or commit_drift:
+        # Show the actual commit at the length the handoff recorded (a short
+        # prefix stays short) so the message reads naturally either way.
+        shown_commit = actual_commit[: len(recorded_c)] if recorded_c else actual_commit[:7]
         messages.append(
             f"drift: handoff recorded {recorded_b or '(unknown)'}@"
-            f"{recorded_c or '(unknown)'} but repo is at {actual_branch}@{actual_commit}"
+            f"{recorded_c or '(unknown)'} but repo is at {actual_branch}@{shown_commit}"
         )
     return messages
