@@ -109,6 +109,11 @@ Below the frontmatter, include these sections:
 - `# Commands And Validation`
 - `# Risks And Constraints`
 
+All eight headings are REQUIRED and validation enforces them: `glue create` and
+`glue validate` reject a handoff whose body is missing any of them, matched at
+line start with the exact `# ` heading text. Validation checks heading presence
+only — it never inspects or scores the prose beneath them.
+
 ## RESUME_PROMPT.txt
 
 Write a short paste-ready prompt:

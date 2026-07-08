@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from session_glue.schema import (
+    REQUIRED_BODY_SECTIONS,
     REQUIRED_FIELDS,
     Handoff,
     HandoffParseError,
@@ -23,6 +24,11 @@ from session_glue.schema import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "handoffs"
+
+# A body carrying every canonical section heading, for constructing handoffs
+# from a raw frontmatter dict (which has no body of its own) that should still
+# pass the required-body-section check.
+_VALID_BODY = "\n\n".join(f"{heading}\n\nnarrative." for heading in REQUIRED_BODY_SECTIONS)
 
 
 def _read(name: str) -> str:
@@ -53,7 +59,7 @@ def test_valid_fixture_parses_cleanly():
         "Handle empty data without Y-axis scaling bug",
     ]
     # Body is preserved after the closing delimiter.
-    assert "Detailed Session Briefing" in handoff.body
+    assert "# Current State" in handoff.body
 
 
 def test_all_required_fields_present_in_valid_fixture():
@@ -256,7 +262,7 @@ def test_validation_result_must_be_a_known_value():
 def test_validation_not_run_result_is_allowed():
     frontmatter = _valid_frontmatter()
     frontmatter["validation"] = [{"command": "npm run typecheck", "result": "not_run"}]
-    assert Handoff.from_frontmatter(frontmatter).validate() == []
+    assert Handoff.from_frontmatter(frontmatter, _VALID_BODY).validate() == []
 
 
 def test_validation_entry_requires_a_command():
@@ -271,18 +277,18 @@ def test_validation_notes_is_optional():
     # commentary — an entry with no notes still validates.
     frontmatter = _valid_frontmatter()
     frontmatter["validation"] = [{"command": "npm test", "result": "passed"}]
-    assert Handoff.from_frontmatter(frontmatter).validate() == []
+    assert Handoff.from_frontmatter(frontmatter, _VALID_BODY).validate() == []
 
 
 def test_active_context_files_accepts_scalars_and_mappings():
     # Backward compatibility: bare-scalar paths still validate…
     frontmatter = _valid_frontmatter()
     frontmatter["active_context_files"] = ["src/foo.py", "src/bar.py"]
-    assert Handoff.from_frontmatter(frontmatter).validate() == []
+    assert Handoff.from_frontmatter(frontmatter, _VALID_BODY).validate() == []
     # …and so do path/reason mappings (the preferred form the fixture uses).
     frontmatter = _valid_frontmatter()
     frontmatter["active_context_files"] = [{"path": "src/foo.py", "reason": "target"}]
-    assert Handoff.from_frontmatter(frontmatter).validate() == []
+    assert Handoff.from_frontmatter(frontmatter, _VALID_BODY).validate() == []
 
 
 # --------------------------------------------------------------------------- #
@@ -300,7 +306,7 @@ def test_decisions_field_is_optional():
 def test_scalar_decisions_validate():
     frontmatter = _valid_frontmatter()
     frontmatter["decisions"] = ["Chose polling over websockets", "Deferred rescale", 42]
-    assert Handoff.from_frontmatter(frontmatter).validate() == []
+    assert Handoff.from_frontmatter(frontmatter, _VALID_BODY).validate() == []
 
 
 def test_non_scalar_decision_entry_fails_with_clear_error():
@@ -333,7 +339,7 @@ def test_supersedes_field_is_optional():
 def test_scalar_supersedes_validates():
     frontmatter = _valid_frontmatter()
     frontmatter["supersedes"] = "2026-06-29-1000-prior-session"
-    handoff = Handoff.from_frontmatter(frontmatter)
+    handoff = Handoff.from_frontmatter(frontmatter, _VALID_BODY)
     assert handoff.validate() == []
     assert handoff.supersedes == "2026-06-29-1000-prior-session"
 
@@ -361,6 +367,55 @@ def test_index_entry_mirrors_supersedes_scalar():
     # Absent -> empty string (preserves the scalar-only index constraint).
     entry_absent = build_index_entry(Handoff.from_text(_read("valid.md")))
     assert entry_absent["supersedes"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# Required narrative body sections (issue #46)
+# --------------------------------------------------------------------------- #
+
+
+def _body_section_errors(errors: list) -> list:
+    return [e for e in errors if e.startswith("missing required body section")]
+
+
+def test_empty_body_fails_naming_all_eight_sections():
+    # An entirely empty body fails and names every missing heading in ONE error.
+    errors = Handoff.from_frontmatter(_valid_frontmatter(), "").validate()
+    section_errors = _body_section_errors(errors)
+    assert len(section_errors) == 1  # one aggregated error, not eight
+    for heading in REQUIRED_BODY_SECTIONS:
+        assert heading in section_errors[0]
+
+
+def test_one_missing_section_names_exactly_that_section():
+    body = "\n\n".join(
+        f"{h}\n\nprose." for h in REQUIRED_BODY_SECTIONS if h != "# Risks And Constraints"
+    )
+    errors = Handoff.from_frontmatter(_valid_frontmatter(), body).validate()
+    assert _body_section_errors(errors) == [
+        "missing required body section(s): # Risks And Constraints"
+    ]
+
+
+def test_all_canonical_sections_present_passes_body_check():
+    errors = Handoff.from_frontmatter(_valid_frontmatter(), _VALID_BODY).validate()
+    assert _body_section_errors(errors) == []
+
+
+def test_body_section_heading_must_be_at_line_start():
+    # An indented "# Resume Prompt" is not a top-level heading — flagged missing.
+    body = _VALID_BODY.replace("# Resume Prompt", "  # Resume Prompt")
+    errors = Handoff.from_frontmatter(_valid_frontmatter(), body).validate()
+    assert _body_section_errors(errors) == [
+        "missing required body section(s): # Resume Prompt"
+    ]
+
+
+def test_valid_fixture_has_all_canonical_sections():
+    handoff = Handoff.from_text(_read("valid.md"))
+    for heading in REQUIRED_BODY_SECTIONS:
+        assert heading in handoff.body
+    assert handoff.validate() == []
 
 
 # --------------------------------------------------------------------------- #

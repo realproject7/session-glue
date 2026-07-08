@@ -32,4 +32,33 @@ validation:
 # Resume Prompt
 
 This handoff is intentionally invalid: `next_todo_items[0]` is a resume mechanic
-rather than the first productive work item, so the lint must flag it.
+rather than the first productive work item, so the lint must flag it. The
+canonical body sections are all present so the lint is the only problem reported.
+
+# What We Did
+
+Placeholder narrative.
+
+# Current State
+
+Placeholder narrative.
+
+# Decisions Made
+
+Placeholder narrative.
+
+# Failed Attempts / Dead Ends
+
+Placeholder narrative.
+
+# Next-Agent Instructions
+
+Placeholder narrative.
+
+# Commands And Validation
+
+Placeholder narrative.
+
+# Risks And Constraints
+
+Placeholder narrative.

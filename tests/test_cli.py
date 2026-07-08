@@ -198,3 +198,63 @@ def test_create_rejects_mapping_todo_entry(tmp_path, capsys):
     assert rc == 2
     assert "next_todo_items[0] must be a scalar" in capsys.readouterr().err
     assert not (tmp_path / ".agent-history").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Freeze-overuse guard (issue #46)
+# --------------------------------------------------------------------------- #
+
+# valid.md's frozen timestamp and session id, for building follow-up freezes.
+_BASE_GENERATED_AT = "2026-06-30T15:30:00+09:00"
+_BASE_SESSION_ID = "2026-06-30-1530-chart-polling"
+
+
+def _create_cli(tmp_path: Path, text: str) -> int:
+    src = _write_handoff(tmp_path, text)
+    return main(["create", "--input", str(src), "--repo-root", str(tmp_path)])
+
+
+def _refreeze(session_id: str, generated_at: str) -> str:
+    """A follow-up handoff derived from VALID with a new id + generated_at."""
+    return VALID.replace(_BASE_SESSION_ID, session_id).replace(
+        _BASE_GENERATED_AT, generated_at
+    )
+
+
+def test_overuse_warns_but_writes_when_refrozen_within_30min(tmp_path, capsys):
+    assert _create_cli(tmp_path, VALID) == 0  # first freeze at 15:30
+    capsys.readouterr()  # drop first-freeze output
+    second = _refreeze("2026-06-30-1540-second", "2026-06-30T15:40:00+09:00")  # +10 min
+    assert _create_cli(tmp_path, second) == 0  # warns but still writes (rc 0)
+    err = capsys.readouterr().err
+    assert "you glued 10 minutes ago" in err
+    assert "bloated" in err
+    assert (tmp_path / ".agent-history" / "LATEST.md").is_file()
+
+
+def test_no_overuse_warning_when_more_than_30min_apart(tmp_path, capsys):
+    assert _create_cli(tmp_path, VALID) == 0  # 15:30
+    capsys.readouterr()
+    later = _refreeze("2026-06-30-1630-second", "2026-06-30T16:30:00+09:00")  # +60 min
+    assert _create_cli(tmp_path, later) == 0
+    assert "you glued" not in capsys.readouterr().err
+
+
+def test_no_overuse_warning_when_prior_generated_at_unparseable(tmp_path, capsys):
+    assert _create_cli(tmp_path, VALID) == 0
+    # Corrupt the prior LATEST.md generated_at so it cannot be parsed as ISO-8601.
+    latest = tmp_path / ".agent-history" / "LATEST.md"
+    latest.write_text(
+        latest.read_text(encoding="utf-8").replace(_BASE_GENERATED_AT, "not-a-timestamp"),
+        encoding="utf-8",
+    )
+    capsys.readouterr()
+    second = _refreeze("2026-06-30-1535-second", "2026-06-30T15:35:00+09:00")
+    assert _create_cli(tmp_path, second) == 0  # fail-open: no crash, still writes
+    assert "you glued" not in capsys.readouterr().err
+
+
+def test_no_overuse_warning_on_first_ever_freeze(tmp_path, capsys):
+    # No prior LATEST.md exists, so the guard has nothing to compare against.
+    assert _create_cli(tmp_path, VALID) == 0
+    assert "you glued" not in capsys.readouterr().err

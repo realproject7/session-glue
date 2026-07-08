@@ -61,6 +61,21 @@ _LIST_FIELDS: frozenset[str] = frozenset(
 # executed this session, rather than silently omitting the check.
 VALIDATION_RESULTS: frozenset[str] = frozenset({"passed", "failed", "not_run"})
 
+# Canonical narrative section headings the handoff body must contain, in order.
+# Validation checks for their presence at line start only (exact ``# `` level and
+# text) — it never inspects or scores the prose beneath them. A body missing any
+# of these is rejected; an empty body names all eight.
+REQUIRED_BODY_SECTIONS: tuple[str, ...] = (
+    "# Resume Prompt",
+    "# What We Did",
+    "# Current State",
+    "# Decisions Made",
+    "# Failed Attempts / Dead Ends",
+    "# Next-Agent Instructions",
+    "# Commands And Validation",
+    "# Risks And Constraints",
+)
+
 # List-valued fields that are allowed to be present-but-empty. ``next_todo_items``
 # is deliberately excluded: it must contain at least a first productive action.
 _LIST_FIELDS_ALLOW_EMPTY: frozenset[str] = frozenset(
@@ -488,6 +503,18 @@ class Handoff:
             lint = lint_first_next_action(self.first_next_action)
             if lint:
                 errors.append(lint)
+
+        # The narrative body must carry the canonical section skeleton so a
+        # resumed agent finds a predictable structure. Headings only — the prose
+        # beneath them is never inspected or scored. Every missing heading is
+        # reported in a single error (an empty body names all eight) rather than
+        # one error per heading. Match at line start with the exact ``# `` level.
+        body_headings = {line.rstrip() for line in self.body.splitlines()}
+        missing_sections = [h for h in REQUIRED_BODY_SECTIONS if h not in body_headings]
+        if missing_sections:
+            errors.append(
+                "missing required body section(s): " + ", ".join(missing_sections)
+            )
         return errors
 
     def is_valid(self) -> bool:

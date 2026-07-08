@@ -37,21 +37,35 @@ validation:
 
 # Resume Prompt
 
-Read this file first. Complete the resume mechanics, then continue from
-`next_todo_items[0]`. Start by inspecting only the files in
-`active_context_files` unless git status shows newer changes.
+Read this file first, then continue from `next_todo_items[0]`. Start by
+inspecting only the files in `active_context_files` unless git status shows
+newer changes.
 
-# Detailed Session Briefing
+# What We Did
 
-## What We Did
+Implemented the static chart layout in `src/components/ChartView.tsx`.
 
-Implemented the static chart layout.
+# Current State
 
-## Current State
+The repo is dirty with the static layout work; the polling lifecycle is not
+wired up yet.
 
-`src/components/ChartView.tsx` is the canonical implementation target. The repo
-is dirty with the static layout work.
+# Decisions Made
 
-## Next-Agent Instructions
+Chose client-side polling over websockets for the first iteration.
 
-Continue from the first `next_todo_items` entry.
+# Failed Attempts / Dead Ends
+
+None recorded this session.
+
+# Next-Agent Instructions
+
+Continue from the first `next_todo_items` entry: add the polling lifecycle.
+
+# Commands And Validation
+
+`npm test` passed; `npm run typecheck` was deferred to the next session.
+
+# Risks And Constraints
+
+Y-axis scaling breaks when data is empty — handle it before shipping.
