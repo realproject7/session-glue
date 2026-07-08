@@ -83,6 +83,18 @@ def test_index_mirrors_first_next_action_and_is_compact(tmp_path):
     assert session["file"] == f"sessions/{SESSION_ID}.md"
 
 
+def test_index_mirrors_primary_goal_and_search_tags(tmp_path):
+    _create(tmp_path, VALID)
+    index = parse_mapping((_history(tmp_path) / "INDEX.yaml").read_text(encoding="utf-8"))
+    # Top-level latest block.
+    assert index["primary_goal"] == _FIXTURE.primary_goal
+    assert index["search_tags"] == "charts, polling, react"
+    # Per-session entry mirrors the same quality fields (scalar-joined tags).
+    session = index["sessions"][0]
+    assert session["primary_goal"] == _FIXTURE.primary_goal
+    assert session["search_tags"] == "charts, polling, react"
+
+
 # --------------------------------------------------------------------------- #
 # Re-run behavior
 # --------------------------------------------------------------------------- #

@@ -35,16 +35,31 @@ REQUIRED_FIELDS: tuple[str, ...] = (
     "head_commit",
     "agent",
     "status",
+    "primary_goal",
     "active_context_files",
     "completed_tasks",
     "next_todo_items",
     "known_issues",
+    "search_tags",
+    "validation",
 )
 
 # Required fields whose value must be a YAML block sequence (a list).
 _LIST_FIELDS: frozenset[str] = frozenset(
-    {"active_context_files", "completed_tasks", "next_todo_items", "known_issues"}
+    {
+        "active_context_files",
+        "completed_tasks",
+        "next_todo_items",
+        "known_issues",
+        "search_tags",
+        "validation",
+    }
 )
+
+# Allowed values for a ``validation`` entry's ``result`` field. ``not_run`` is a
+# first-class value: it records a check that was defined but deliberately not
+# executed this session, rather than silently omitting the check.
+VALIDATION_RESULTS: frozenset[str] = frozenset({"passed", "failed", "not_run"})
 
 # List-valued fields that are allowed to be present-but-empty. ``next_todo_items``
 # is deliberately excluded: it must contain at least a first productive action.
@@ -341,10 +356,13 @@ class Handoff:
     head_commit: str | None = None
     agent: str | None = None
     status: str | None = None
+    primary_goal: str | None = None
     active_context_files: list[Any] = field(default_factory=list)
     completed_tasks: list[Any] = field(default_factory=list)
     next_todo_items: list[Any] = field(default_factory=list)
     known_issues: list[Any] = field(default_factory=list)
+    search_tags: list[Any] = field(default_factory=list)
+    validation: list[Any] = field(default_factory=list)
     body: str = ""
     # Keys actually present in the source frontmatter (drives presence checks).
     present_fields: frozenset[str] = field(default_factory=frozenset)
@@ -405,6 +423,34 @@ class Handoff:
                         f"not {type(item).__name__}"
                     )
 
+        # Every validation entry must be a command/result/notes mapping so the
+        # quality record is machine-checkable and never renders a Python repr.
+        # ``result`` must be one of passed/failed/not_run.
+        if isinstance(self.validation, list):
+            for idx, item in enumerate(self.validation):
+                if not isinstance(item, dict):
+                    errors.append(
+                        f"validation[{idx}] must be a command/result/notes mapping, "
+                        f"not {type(item).__name__}"
+                    )
+                    continue
+                command = item.get("command")
+                if not isinstance(command, (str, int)) or (
+                    isinstance(command, str) and not command.strip()
+                ):
+                    errors.append(
+                        f"validation[{idx}].command is required and must be a non-empty scalar"
+                    )
+                result = item.get("result")
+                if result not in VALIDATION_RESULTS:
+                    errors.append(
+                        f"validation[{idx}].result must be one of "
+                        f"passed/failed/not_run, got {result!r}"
+                    )
+                # ``notes`` is optional commentary — command + result are the
+                # machine-checkable record; forcing notes on every entry only
+                # produces boilerplate filler.
+
         if "next_todo_items" in self.present_fields:
             lint = lint_first_next_action(self.first_next_action)
             if lint:
@@ -436,10 +482,25 @@ def lint_first_next_action(item: Any) -> str | None:
 # --------------------------------------------------------------------------- #
 
 
+def join_search_tags(tags: Any) -> str:
+    """Mirror ``search_tags`` into a single greppable ``INDEX.yaml`` scalar.
+
+    The constrained INDEX serializer only supports scalar values inside a session
+    entry (a block sequence of single-level mappings), so tags are mirrored as a
+    comma-joined string rather than a nested list — enough for "which session dealt
+    with <topic>?" to be answerable from ``INDEX.yaml`` alone, without a parser
+    change.
+    """
+    if not isinstance(tags, list):
+        return ""
+    return ", ".join(str(tag) for tag in tags)
+
+
 def build_index_entry(handoff: Handoff) -> dict[str, Any]:
     """Build a compact ``INDEX.yaml`` session entry for a handoff.
 
-    ``first_next_action`` mirrors ``next_todo_items[0]``; the full
+    ``first_next_action`` mirrors ``next_todo_items[0]``; ``search_tags`` is
+    mirrored as a comma-joined scalar (see :func:`join_search_tags`). The full
     ``next_todo_items`` list is intentionally omitted so the index does not
     compete with the canonical handoff file.
     """
@@ -454,6 +515,8 @@ def build_index_entry(handoff: Handoff) -> dict[str, Any]:
         "current_branch": handoff.current_branch,
         "head_commit": handoff.head_commit,
         "status": handoff.status,
+        "primary_goal": handoff.primary_goal,
+        "search_tags": join_search_tags(handoff.search_tags),
         "first_next_action": handoff.first_next_action,
     }
 

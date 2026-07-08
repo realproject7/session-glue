@@ -24,6 +24,7 @@ from .schema import (
     build_index_entry,
     build_resume_prompt,
     dump_mapping,
+    join_search_tags,
     parse_frontmatter,
     parse_mapping,
 )
@@ -147,6 +148,8 @@ def build_index(existing: dict | None, handoff: Handoff, archive_file: str) -> d
         "repo_root": handoff.repo_root,
         "current_branch": handoff.current_branch,
         "head_commit": handoff.head_commit,
+        "primary_goal": handoff.primary_goal,
+        "search_tags": join_search_tags(handoff.search_tags),
         "first_next_action": handoff.first_next_action,
         "sessions": sessions,
     }

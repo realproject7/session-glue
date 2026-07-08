@@ -197,6 +197,95 @@ def test_issue33_real_mechanics_still_flagged(item):
 
 
 # --------------------------------------------------------------------------- #
+# Quality fields — primary_goal, search_tags, validation (issue #43)
+# --------------------------------------------------------------------------- #
+
+
+def _valid_frontmatter() -> dict:
+    frontmatter, _ = parse_frontmatter(_read("valid.md"))
+    return frontmatter
+
+
+def test_valid_fixture_carries_new_quality_fields():
+    handoff = Handoff.from_text(_read("valid.md"))
+    assert handoff.primary_goal == "Ship the chart polling lifecycle with clean teardown"
+    assert handoff.search_tags == ["charts", "polling", "react"]
+    assert handoff.validation[0] == {
+        "command": "npm test",
+        "result": "passed",
+        "notes": "Unit suite green",
+    }
+    assert handoff.validate() == []
+
+
+def test_missing_primary_goal_fails_validation():
+    frontmatter = _valid_frontmatter()
+    del frontmatter["primary_goal"]
+    errors = Handoff.from_frontmatter(frontmatter).validate()
+    assert any("primary_goal" in e for e in errors)
+
+
+def test_empty_search_tags_fails_validation():
+    frontmatter = _valid_frontmatter()
+    frontmatter["search_tags"] = []
+    errors = Handoff.from_frontmatter(frontmatter).validate()
+    assert any("search_tags" in e for e in errors)
+
+
+def test_missing_validation_fails_validation():
+    frontmatter = _valid_frontmatter()
+    del frontmatter["validation"]
+    errors = Handoff.from_frontmatter(frontmatter).validate()
+    assert "missing required field: validation" in errors
+
+
+def test_non_mapping_validation_entry_fails_with_clear_error():
+    frontmatter = _valid_frontmatter()
+    frontmatter["validation"] = ["ran the tests"]  # scalar, not a mapping
+    errors = Handoff.from_frontmatter(frontmatter).validate()
+    assert any("validation[0] must be a command/result/notes mapping" in e for e in errors)
+
+
+def test_validation_result_must_be_a_known_value():
+    frontmatter = _valid_frontmatter()
+    frontmatter["validation"] = [{"command": "npm test", "result": "green", "notes": "x"}]
+    errors = Handoff.from_frontmatter(frontmatter).validate()
+    assert any("validation[0].result must be one of passed/failed/not_run" in e for e in errors)
+
+
+def test_validation_not_run_result_is_allowed():
+    frontmatter = _valid_frontmatter()
+    frontmatter["validation"] = [{"command": "npm run typecheck", "result": "not_run"}]
+    assert Handoff.from_frontmatter(frontmatter).validate() == []
+
+
+def test_validation_entry_requires_a_command():
+    frontmatter = _valid_frontmatter()
+    frontmatter["validation"] = [{"result": "passed", "notes": "x"}]
+    errors = Handoff.from_frontmatter(frontmatter).validate()
+    assert any("validation[0].command is required" in e for e in errors)
+
+
+def test_validation_notes_is_optional():
+    # Per the clarified contract: command + result are required, notes is optional
+    # commentary — an entry with no notes still validates.
+    frontmatter = _valid_frontmatter()
+    frontmatter["validation"] = [{"command": "npm test", "result": "passed"}]
+    assert Handoff.from_frontmatter(frontmatter).validate() == []
+
+
+def test_active_context_files_accepts_scalars_and_mappings():
+    # Backward compatibility: bare-scalar paths still validate…
+    frontmatter = _valid_frontmatter()
+    frontmatter["active_context_files"] = ["src/foo.py", "src/bar.py"]
+    assert Handoff.from_frontmatter(frontmatter).validate() == []
+    # …and so do path/reason mappings (the preferred form the fixture uses).
+    frontmatter = _valid_frontmatter()
+    frontmatter["active_context_files"] = [{"path": "src/foo.py", "reason": "target"}]
+    assert Handoff.from_frontmatter(frontmatter).validate() == []
+
+
+# --------------------------------------------------------------------------- #
 # Derived artifacts
 # --------------------------------------------------------------------------- #
 
@@ -207,6 +296,16 @@ def test_index_first_next_action_mirrors_next_todo_items_0():
     assert entry["first_next_action"] == handoff.next_todo_items[0]
     # And the index does not carry the full next_todo_items list.
     assert "next_todo_items" not in entry
+
+
+def test_index_entry_mirrors_primary_goal_and_search_tags():
+    handoff = Handoff.from_text(_read("valid.md"))
+    entry = build_index_entry(handoff)
+    assert entry["primary_goal"] == handoff.primary_goal
+    # search_tags mirror as a single greppable scalar, not a nested list, because
+    # the constrained INDEX serializer only supports scalar values in a session entry.
+    assert entry["search_tags"] == "charts, polling, react"
+    assert isinstance(entry["search_tags"], str)
 
 
 def test_fixture_index_matches_handoff_first_next_action():

@@ -11,4 +11,6 @@ sessions:
     current_branch: main
     head_commit: abc1234
     status: in_progress
+    primary_goal: Ship the chart polling lifecycle with clean teardown
+    search_tags: charts, polling, react
     first_next_action: "Add polling lifecycle with cleanup"
