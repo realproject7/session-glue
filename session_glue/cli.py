@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import __version__, gitcheck, installer, leakscan, reader, validator, writer
+from . import __version__, gitcheck, installer, leakscan, reader, skills, validator, writer
 from .schema import (
     Handoff,
     HandoffParseError,
@@ -198,6 +198,98 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required: print the target path and proposed block without writing.",
     )
     install.set_defaults(func=_cmd_install)
+
+    skill = subparsers.add_parser(
+        "skill",
+        help="Install, inspect, or remove bundled agent skill folders.",
+        description=(
+            "Manage dedicated agent skill folders bundled with Session Glue. "
+            "Installs the bundled skill into .agents/skills/session-glue/ (repo "
+            "or user scope) — it never edits AGENTS.md or any global instruction "
+            "file, and never writes outside that folder."
+        ),
+    )
+    skill_sub = skill.add_subparsers(dest="skill_command", metavar="<subcommand>", required=True)
+
+    skill_list = skill_sub.add_parser(
+        "list",
+        help="List supported agents and whether each bundled skill exists.",
+    )
+    skill_list.set_defaults(func=_cmd_skill_list)
+
+    skill_show = skill_sub.add_parser(
+        "show",
+        help="Show repo/user target paths and the bundled SKILL.md for an agent.",
+    )
+    skill_show.add_argument("agent", choices=skills.SUPPORTED_AGENTS, help="Agent to show.")
+    skill_show.add_argument(
+        "--repo-root",
+        default=".",
+        metavar="PATH",
+        help="Repo root for the repo-scope target path (default: current directory).",
+    )
+    skill_show.set_defaults(func=_cmd_skill_show)
+
+    skill_install = skill_sub.add_parser(
+        "install",
+        help="Install a bundled agent skill folder.",
+        description=(
+            "Copy the bundled agent skill (SKILL.md and its supporting files) "
+            "into .agents/skills/session-glue/ under the repo or user scope."
+        ),
+    )
+    skill_install.add_argument("agent", choices=skills.SUPPORTED_AGENTS)
+    skill_install.add_argument(
+        "--scope",
+        choices=skills.SCOPES,
+        default="repo",
+        help="Install into the repo (recommended default) or user home scope.",
+    )
+    skill_install.add_argument(
+        "--repo-root",
+        default=".",
+        metavar="PATH",
+        help="Repo root for repo scope (default: current directory).",
+    )
+    skill_install.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the exact writes/removals and touch nothing.",
+    )
+    skill_install.add_argument(
+        "--replace",
+        action="store_true",
+        help="Overwrite an existing skill folder (managed files only; refuses unmanaged extras).",
+    )
+    skill_install.set_defaults(func=_cmd_skill_install)
+
+    skill_uninstall = skill_sub.add_parser(
+        "uninstall",
+        help="Remove an installed agent skill folder (managed files only).",
+        description=(
+            "Remove the managed skill files from .agents/skills/session-glue/ and "
+            "the folder itself when empty. Refuses if unmanaged files are present."
+        ),
+    )
+    skill_uninstall.add_argument("agent", choices=skills.SUPPORTED_AGENTS)
+    skill_uninstall.add_argument(
+        "--scope",
+        choices=skills.SCOPES,
+        default="repo",
+        help="Uninstall from the repo (default) or user home scope.",
+    )
+    skill_uninstall.add_argument(
+        "--repo-root",
+        default=".",
+        metavar="PATH",
+        help="Repo root for repo scope (default: current directory).",
+    )
+    skill_uninstall.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the exact removals and touch nothing.",
+    )
+    skill_uninstall.set_defaults(func=_cmd_skill_uninstall)
 
     return parser
 
@@ -462,6 +554,91 @@ def _cmd_install(args: argparse.Namespace) -> int:
         print("proposed block:")
         print(block)
         print()
+    print(
+        "note: 'glue install' is legacy (dry-run only). Use "
+        "'glue skill install <agent>' to install a dedicated skill folder."
+    )
+    return 0
+
+
+def _cmd_skill_list(args: argparse.Namespace) -> int:
+    """Implement ``glue skill list``."""
+    for agent in skills.SUPPORTED_AGENTS:
+        state = "present" if skills.bundle_present(agent) else "MISSING"
+        print(f"{agent}: bundled skill {state}")
+    return 0
+
+
+def _cmd_skill_show(args: argparse.Namespace) -> int:
+    """Implement ``glue skill show <agent>``."""
+    agent = args.agent
+    print(f"agent: {agent}")
+    print(f"repo target: {skills.skill_target('repo', args.repo_root)}")
+    print(f"user target: {skills.skill_target('user')}")
+    state = "present" if skills.bundle_present(agent) else "MISSING"
+    print(f"bundled skill: {state}")
+    print("--- SKILL.md ---")
+    # Print the bundled SKILL.md exactly (no added/stripped trailing newline).
+    sys.stdout.write(skills.bundled_skill_md(agent))
+    return 0
+
+
+def _print_skill_plan(label: str, plan: skills.SkillPlan, dry_run: bool) -> None:
+    """Print a skill plan's exact writes/removals (dry-run marks them prospective)."""
+    suffix = " (dry-run — nothing changed)" if dry_run else ""
+    print(f"{label}: target {plan.target}{suffix}")
+    verb = "would " if dry_run else ""
+    for path in plan.removes:
+        print(f"  {verb}remove {path}")
+    for path in plan.writes:
+        print(f"  {verb}write {path}")
+
+
+def _cmd_skill_install(args: argparse.Namespace) -> int:
+    """Implement ``glue skill install <agent> --scope repo|user``."""
+    try:
+        plan = skills.plan_install(
+            args.agent, args.scope, repo_root=args.repo_root, replace=args.replace
+        )
+    except skills.SkillInstallError as exc:
+        print(f"glue skill install: {exc}", file=sys.stderr)
+        return 1
+
+    _print_skill_plan("glue skill install", plan, args.dry_run)
+    if args.dry_run:
+        return 0
+
+    try:
+        skills.apply_install(plan)
+    except skills.SkillInstallError as exc:
+        print(f"glue skill install: {exc}", file=sys.stderr)
+        return 1
+    print(f"glue skill install: installed {args.agent} skill into {plan.target}")
+    return 0
+
+
+def _cmd_skill_uninstall(args: argparse.Namespace) -> int:
+    """Implement ``glue skill uninstall <agent> --scope repo|user``."""
+    try:
+        plan = skills.plan_uninstall(args.agent, args.scope, repo_root=args.repo_root)
+    except skills.SkillNotInstalledError as exc:
+        # Not installed is a friendly no-op, not a failure.
+        print(f"glue skill uninstall: {exc} — nothing to remove")
+        return 0
+    except skills.SkillInstallError as exc:
+        print(f"glue skill uninstall: {exc}", file=sys.stderr)
+        return 1
+
+    _print_skill_plan("glue skill uninstall", plan, args.dry_run)
+    if args.dry_run:
+        return 0
+
+    try:
+        skills.apply_uninstall(plan)
+    except skills.SkillInstallError as exc:
+        print(f"glue skill uninstall: {exc}", file=sys.stderr)
+        return 1
+    print(f"glue skill uninstall: removed {args.agent} skill from {plan.target}")
     return 0
 
 

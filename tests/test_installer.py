@@ -87,6 +87,13 @@ def test_install_without_dry_run_is_blocked(capsys):
     assert "--dry-run" in capsys.readouterr().err
 
 
+def test_legacy_install_mentions_skill_install_successor(capsys):
+    # Legacy `glue install` stays dry-run-only but points at its successor.
+    assert main(["install", "codex", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "glue skill install" in out
+
+
 def test_unknown_agent_is_rejected():
     with pytest.raises(SystemExit) as exc_info:
         main(["install", "notanagent", "--dry-run"])
