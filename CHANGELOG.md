@@ -16,6 +16,7 @@ Releases are built and published from CI going forward.
 - `glue validate` now runs stronger cross-file consistency checks between `LATEST.md`, `INDEX.yaml`, and archived sessions.
 - `glue create` accepts a `--allow-flagged-todo` flag to override the resume-mechanic guard when a flagged first todo is intentional.
 - `glue status` now reports the handoff lifecycle `status` and a `sessions:` count, and `glue create` prints a hint when it is reading from an interactive terminal.
+- The test suite now runs in CI across Linux, macOS, and Windows on Python 3.10 through 3.13.
 
 ### Changed
 
