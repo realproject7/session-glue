@@ -372,6 +372,17 @@ def test_symlinked_output_file_is_rejected(tmp_path):
     assert not evil.exists()
 
 
+def test_symlinked_decisions_file_is_rejected(tmp_path):
+    repo, outside = _repo_and_outside(tmp_path)
+    (repo / ".agent-history").mkdir()
+    evil = outside / "stolen-decisions.md"
+    (repo / ".agent-history" / "DECISIONS.md").symlink_to(evil)
+    rc = _create_in(repo, VALID_WITH_DECISIONS)
+    assert rc == 1
+    # The write is rejected before any output, so nothing leaks through the symlink.
+    assert not evil.exists()
+
+
 def test_create_reads_from_stdin(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO(VALID))
     rc = main(["create", "--repo-root", str(tmp_path)])
