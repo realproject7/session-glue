@@ -53,7 +53,7 @@ def test_no_args_prints_help_and_exits_zero(capsys):
 
 
 @pytest.mark.parametrize(
-    "command", ["create", "validate", "status", "resume-prompt", "close", "install"]
+    "command", ["create", "validate", "status", "resume-prompt", "close", "install", "skill"]
 )
 def test_subcommands_are_registered(command, capsys):
     with pytest.raises(SystemExit) as exc_info:
