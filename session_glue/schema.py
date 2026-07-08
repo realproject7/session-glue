@@ -103,16 +103,39 @@ class HandoffParseError(ValueError):
 
 # A block-sequence item that begins a mapping, e.g. ``- path: src/foo.py``.
 _MAPPING_ITEM_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*:\s")
-# A top-level ``key: ...`` line.
+# An all-integer scalar (used only for ``schema_version`` coercion).
 _INT_RE = re.compile(r"-?\d+$")
+# A YAML block-scalar indicator standing alone as a value (``|``, ``>``, ``>-``,
+# ``|-`` ...): the shape of a multi-line value, which this subset rejects.
+_BLOCK_SCALAR_RE = re.compile(r"[|>][-+]?\d*$")
+
+
+def _strip_inline_comment(token: str) -> str:
+    """Strip an inline ``#`` comment from an unquoted scalar.
+
+    A ``#`` that starts the value or is preceded by whitespace begins a comment;
+    everything from there on is dropped. A ``#`` glued to other characters (e.g.
+    ``C#`` or ``a#b``) is kept as part of the value. Callers only apply this to
+    unquoted scalars, so a ``#`` inside a quoted string stays literal.
+    """
+    for i, ch in enumerate(token):
+        if ch == "#" and (i == 0 or token[i - 1] in " \t"):
+            return token[:i]
+    return token
 
 
 def _parse_scalar(token: str) -> Any:
-    """Parse a single scalar value (quoted string, integer, or bare string).
+    """Parse a single scalar value (quoted string, ``[]`` literal, or bare string).
 
     Double-quoted strings are unescaped so they round-trip with
-    :func:`_dump_scalar`, which escapes ``\\`` and ``"``. Single-quoted strings
-    are taken literally (the serializer only ever emits double quotes).
+    :func:`_dump_scalar`, which escapes ``\\`` and ``"``; a ``#`` inside a quoted
+    string stays literal. For an unquoted scalar, an inline ``#`` comment is
+    stripped. The literal ``[]`` is the only flow-style form accepted and parses
+    to an empty list (``[a, b]`` is deliberately unsupported and stays a string,
+    which then fails the list-field check loudly). Integers are NOT coerced here:
+    all-digit values keep their literal string so identifiers like a numeric
+    ``head_commit`` are not silently turned into ints (``schema_version`` is the
+    one field coerced, in :func:`parse_mapping`).
     """
     token = token.strip()
     if len(token) >= 2 and token[0] in "\"'" and token[-1] == token[0]:
@@ -122,9 +145,17 @@ def _parse_scalar(token: str) -> Any:
             # ``\\`` -> ``\`` and ``\"`` -> ``"``.
             inner = re.sub(r"\\(.)", lambda m: m.group(1), inner)
         return inner
-    if _INT_RE.match(token):
-        return int(token)
+    token = _strip_inline_comment(token).strip()
+    if token == "[]":
+        return []
     return token
+
+
+def _coerce_schema_version(value: Any) -> Any:
+    """Coerce an all-digit ``schema_version`` value to ``int``; leave others as-is."""
+    if isinstance(value, str) and _INT_RE.match(value):
+        return int(value)
+    return value
 
 
 def _indent(line: str) -> int:
@@ -187,15 +218,31 @@ def parse_mapping(text: str) -> dict[str, Any]:
             i += 1
             continue
         if raw[0] in " \t":
-            raise HandoffParseError(f"unexpected indentation at top level: {raw!r}")
+            # A value spilling onto an indented continuation line: this subset
+            # keeps every value on one line, so explain that instead of the old
+            # cryptic "unexpected indentation" message.
+            raise HandoffParseError(
+                "multi-line YAML values are not supported — keep each value on "
+                f"one line (unexpected indentation at: {raw!r})"
+            )
         if ":" not in raw:
             raise HandoffParseError(f"expected 'key: value', got: {raw!r}")
 
         key, _, rest = raw.partition(":")
         key = key.strip()
+        if key in data:
+            raise HandoffParseError(f"duplicate top-level key: {key!r}")
         rest = rest.strip()
+        if rest and _BLOCK_SCALAR_RE.match(rest):
+            # ``key: |`` / ``key: >-`` etc. introduce a multi-line block scalar.
+            raise HandoffParseError(
+                "multi-line YAML values are not supported — keep each value on one line"
+            )
         if rest:
-            data[key] = _parse_scalar(rest)
+            value = _parse_scalar(rest)
+            if key == "schema_version":
+                value = _coerce_schema_version(value)
+            data[key] = value
             i += 1
             continue
 

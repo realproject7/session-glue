@@ -44,6 +44,8 @@ known_issues:
   - Known blocker or risk.
 ```
 
+Values must be single-line, and inline `#` comments after values are treated as comments.
+
 The first entry, next_todo_items[0], must be productive work, not resume mechanics. Do not use
 phrases such as "paste the prompt", "start a new session", "read LATEST.md",
 "inspect the handoff", or "verify the new agent reads the handoff".

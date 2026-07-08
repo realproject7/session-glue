@@ -200,6 +200,96 @@ def test_resume_prompt_points_at_latest_and_first_action():
 
 
 # --------------------------------------------------------------------------- #
+# YAML-subset friction reductions (issue #37)
+# --------------------------------------------------------------------------- #
+
+
+def test_empty_list_literal_parses_as_empty_list():
+    # Behavior 1: `[]` is accepted as an empty list (previously rejected).
+    parsed = parse_mapping("active_context_files: []")
+    assert parsed == {"active_context_files": []}
+    assert isinstance(parsed["active_context_files"], list)
+
+
+def test_flow_list_with_items_stays_unsupported_and_fails_loudly():
+    # Behavior 1: `[a, b]` is NOT flow-parsed; it stays a scalar string, so a
+    # list field then fails loudly instead of silently accepting flow YAML.
+    parsed = parse_mapping("active_context_files: [a, b]")
+    assert parsed["active_context_files"] == "[a, b]"
+    handoff = Handoff.from_frontmatter(parsed)
+    assert any("must be a list: active_context_files" in e for e in handoff.validate())
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "notes: |\n  line one\n  line two",  # block literal indicator
+        "notes: >-\n  folded text",  # folded block indicator
+        "notes: value\n  spilled onto a second line",  # bare continuation
+    ],
+)
+def test_multiline_values_rejected_with_clear_message(text):
+    # Behavior 2: multi-line value shapes get a clear single-line message, not
+    # the old cryptic "unexpected indentation at top level".
+    with pytest.raises(HandoffParseError) as exc_info:
+        parse_mapping(text)
+    message = str(exc_info.value)
+    assert "multi-line" in message.lower()
+    assert "one line" in message
+
+
+def test_inline_comment_after_unquoted_scalar_is_stripped():
+    # Behavior 3: `# ...` preceded by whitespace is a comment and dropped.
+    assert parse_mapping("head_commit: abc1234 # short sha")["head_commit"] == "abc1234"
+
+
+def test_hash_inside_quoted_string_stays_literal():
+    # Behavior 3: a `#` inside a quoted string is NOT a comment.
+    assert parse_mapping('note: "release # 5"')["note"] == "release # 5"
+
+
+def test_hash_glued_to_text_is_not_a_comment():
+    # Behavior 3: a `#` not preceded by whitespace stays part of the value.
+    assert parse_mapping("lang: C#sharp")["lang"] == "C#sharp"
+
+
+def test_duplicate_top_level_key_raises_naming_the_key():
+    # Behavior 4: duplicate top-level keys are an error, not last-one-wins.
+    with pytest.raises(HandoffParseError) as exc_info:
+        parse_mapping("agent: codex\nagent: claude")
+    message = str(exc_info.value)
+    assert "duplicate" in message.lower()
+    assert "agent" in message
+
+
+def test_only_schema_version_is_coerced_to_int():
+    # Behavior 5: schema_version coerces to int; other all-digit fields keep
+    # their literal string (no `1234567` -> int, no `007` -> 7).
+    parsed = parse_mapping("schema_version: 2\nhead_commit: 1234567\nsession_id: 007")
+    assert parsed["schema_version"] == 2
+    assert isinstance(parsed["schema_version"], int)
+    assert parsed["head_commit"] == "1234567"
+    assert parsed["session_id"] == "007"
+
+
+def test_numeric_hash_round_trips_as_string():
+    # Behavior 5 round-trip: a numeric-looking hash stays a string across
+    # parse -> dump -> parse.
+    data = {"head_commit": "1234567"}
+    reparsed = parse_mapping(dump_mapping(data))
+    assert reparsed == data
+    assert isinstance(reparsed["head_commit"], str)
+
+
+def test_comment_stripped_value_round_trips_stably():
+    # Behavior 3 round-trip: the first parse drops the comment; the cleaned
+    # value is then stable across parse -> dump -> parse.
+    once = parse_mapping("head_commit: abc1234 # sha")
+    assert once == {"head_commit": "abc1234"}
+    assert parse_mapping(dump_mapping(once)) == once
+
+
+# --------------------------------------------------------------------------- #
 # Serializer round-trip
 # --------------------------------------------------------------------------- #
 
