@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import __version__, gitcheck, installer, leakscan, reader, validator, writer
@@ -208,6 +209,10 @@ def _read_input(source: str) -> str:
     return Path(source).read_text(encoding="utf-8")
 
 
+# Freeze-overuse guard: warn when the previous freeze was this recent.
+OVERUSE_WINDOW = timedelta(minutes=30)
+
+
 def _cmd_create(args: argparse.Namespace) -> int:
     """Implement ``glue create``."""
     # When defaulting to stdin at an interactive terminal, hint before blocking
@@ -269,6 +274,41 @@ def _cmd_create(args: argparse.Namespace) -> int:
             f"{handoff.supersedes!r} (not in INDEX.yaml sessions[])",
             file=sys.stderr,
         )
+
+    # Freeze-overuse guard (advisory, fail-open): if the previous LATEST.md was
+    # frozen less than 30 minutes before this handoff, warn that the session may
+    # not be bloated enough to warrant a fresh freeze. Read the PRIOR LATEST.md
+    # before create_handoff overwrites it; any missing/unparseable/mismatched
+    # timestamp silently skips the check (never blocks, never crashes).
+    prior_latest = repo_root / writer.AGENT_HISTORY_DIRNAME / writer.LATEST_FILENAME
+    if prior_latest.is_file():
+        try:
+            prior_generated_at = Handoff.from_text(
+                prior_latest.read_text(encoding="utf-8")
+            ).generated_at
+        except (OSError, HandoffParseError):
+            prior_generated_at = None
+        # Parse both ISO-8601 timestamps inline (tolerating a trailing ``Z``); a
+        # missing or unparseable value becomes None so the comparison is skipped.
+        parsed: list = []
+        for raw in (prior_generated_at, handoff.generated_at):
+            try:
+                parsed.append(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+            except (AttributeError, TypeError, ValueError):
+                parsed.append(None)
+        prev_ts, curr_ts = parsed
+        if prev_ts is not None and curr_ts is not None:
+            try:
+                elapsed = curr_ts - prev_ts
+            except TypeError:
+                elapsed = None  # naive/aware mismatch — fail-open, skip the check
+            if elapsed is not None and timedelta(0) <= elapsed < OVERUSE_WINDOW:
+                minutes = int(elapsed.total_seconds() // 60)
+                print(
+                    f"glue create: WARNING: you glued {minutes} minutes ago — "
+                    "is this session actually bloated?",
+                    file=sys.stderr,
+                )
 
     try:
         written = writer.create_handoff(

@@ -30,4 +30,33 @@ validation:
 # Resume Prompt
 
 This handoff is intentionally missing the required `head_commit` field so that
-validation reports a missing-field error.
+validation reports a missing-field error. The canonical body sections are all
+present so the missing-field error is the only problem reported.
+
+# What We Did
+
+Placeholder narrative.
+
+# Current State
+
+Placeholder narrative.
+
+# Decisions Made
+
+Placeholder narrative.
+
+# Failed Attempts / Dead Ends
+
+Placeholder narrative.
+
+# Next-Agent Instructions
+
+Placeholder narrative.
+
+# Commands And Validation
+
+Placeholder narrative.
+
+# Risks And Constraints
+
+Placeholder narrative.

@@ -57,7 +57,7 @@ def test_status_does_not_print_full_narrative(tmp_path, capsys):
     main(["status", "--repo-root", str(tmp_path)])
     out = capsys.readouterr().out
     # Token-economics: the session narrative body must not be reproduced.
-    assert "Detailed Session Briefing" not in out
+    assert "static chart layout" not in out
 
 
 def test_status_reports_lifecycle_status_and_session_count(tmp_path, capsys):
