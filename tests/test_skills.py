@@ -231,3 +231,34 @@ def test_skill_requires_a_subcommand():
     with pytest.raises(SystemExit) as exc_info:
         main(["skill"])
     assert exc_info.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# A regular file at the target path is malformed, not a skill folder
+# --------------------------------------------------------------------------- #
+
+
+def _file_at_target(tmp_path: Path) -> Path:
+    target = _target(tmp_path)
+    target.parent.mkdir(parents=True)
+    target.write_text("not a skill folder", encoding="utf-8")
+    return target
+
+
+def test_install_rejects_regular_file_target(tmp_path, capsys):
+    _file_at_target(tmp_path)
+    # Both with and without --replace must fail cleanly (no FileExistsError crash).
+    assert _install(tmp_path) == 1
+    assert "not a directory" in capsys.readouterr().err
+    assert _install(tmp_path, "--replace") == 1
+    assert "not a directory" in capsys.readouterr().err
+    # The stray file is left untouched.
+    assert _target(tmp_path).read_text(encoding="utf-8") == "not a skill folder"
+
+
+def test_uninstall_rejects_regular_file_target(tmp_path, capsys):
+    target = _file_at_target(tmp_path)
+    # Must not silently claim success on a malformed (non-directory) target.
+    assert main(["skill", "uninstall", "codex", "--repo-root", str(tmp_path)]) == 1
+    assert "not a directory" in capsys.readouterr().err
+    assert target.is_file()

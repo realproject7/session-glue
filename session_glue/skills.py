@@ -64,6 +64,18 @@ def _assert_within(path: Path, root: Path) -> None:
         raise SkillInstallError(f"refusing to write outside {root_resolved}: {path}")
 
 
+def _reject_non_directory(path: Path) -> None:
+    """Refuse a target that exists but is not a directory (e.g. a regular file).
+
+    A plain file where the skill folder should be is malformed: ``install
+    --replace`` would otherwise crash on ``mkdir`` and ``uninstall`` would
+    silently no-op. Call after :func:`_reject_symlink` so symlinks are reported
+    as symlinks first. (An installed skill folder is always a directory.)
+    """
+    if path.exists() and not path.is_dir():
+        raise SkillInstallError(f"target exists but is not a directory: {path}")
+
+
 def _require_supported(agent: str) -> None:
     if agent not in SUPPORTED_AGENTS:
         raise SkillInstallError(
@@ -146,6 +158,7 @@ def plan_install(
     plan = SkillPlan(agent=agent, scope=scope, target=target, root=root)
 
     _reject_symlink(target)
+    _reject_non_directory(target)
     if target.exists():
         if not replace:
             raise SkillInstallError(
@@ -203,6 +216,7 @@ def plan_uninstall(
     if not target.exists() and not target.is_symlink():
         raise SkillNotInstalledError(f"no skill installed at {target}")
     _reject_symlink(target)
+    _reject_non_directory(target)
     extras = _unmanaged_extras(target, files)
     if extras:
         raise SkillInstallError(
