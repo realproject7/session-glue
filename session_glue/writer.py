@@ -34,6 +34,14 @@ SESSIONS_DIRNAME = "sessions"
 LATEST_FILENAME = "LATEST.md"
 RESUME_PROMPT_FILENAME = "RESUME_PROMPT.txt"
 INDEX_FILENAME = "INDEX.yaml"
+DECISIONS_FILENAME = "DECISIONS.md"
+
+# Written once, the first time a decision is appended.
+DECISIONS_HEADER = (
+    "# Decisions\n\n"
+    "Append-only log of durable decisions; one line each. "
+    "Read after LATEST.md on resume.\n\n"
+)
 
 _UNSAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -155,6 +163,40 @@ def build_index(existing: dict | None, handoff: Handoff, archive_file: str) -> d
     }
 
 
+def _decision_line(handoff: Handoff, decision: object) -> str:
+    """Format one append-only DECISIONS.md line for ``decision``."""
+    return f"- [{handoff.session_date}][{handoff.session_id}] {decision}"
+
+
+def append_decisions(decisions_path: Path, handoff: Handoff) -> bool:
+    """Append this session's ``decisions`` to the append-only DECISIONS.md log.
+
+    Creates the file with a header on first write and never rewrites existing
+    content. A decision whose exact line already exists is skipped, so re-running
+    ``glue create`` for the same session does not duplicate entries. Returns True
+    if the file exists after the call (i.e. any decision has ever been logged).
+    """
+    decisions = handoff.decisions
+    if not isinstance(decisions, list) or not decisions:
+        return decisions_path.exists()
+
+    existing_text = decisions_path.read_text(encoding="utf-8") if decisions_path.exists() else ""
+    seen = set(existing_text.splitlines())
+    new_lines: list[str] = []
+    for decision in decisions:
+        line = _decision_line(handoff, decision)
+        if line in seen:
+            continue
+        seen.add(line)
+        new_lines.append(line)
+
+    if new_lines:
+        header = "" if existing_text else DECISIONS_HEADER
+        with decisions_path.open("a", encoding="utf-8") as fh:
+            fh.write(header + "\n".join(new_lines) + "\n")
+    return decisions_path.exists()
+
+
 def create_handoff(
     repo_root: Path,
     frontmatter: dict,
@@ -179,12 +221,13 @@ def create_handoff(
     latest_path = history_dir / LATEST_FILENAME
     resume_path = history_dir / RESUME_PROMPT_FILENAME
     index_path = history_dir / INDEX_FILENAME
+    decisions_path = history_dir / DECISIONS_FILENAME
 
     # Safety checks BEFORE creating directories or writing anything, so a
     # rejected write leaves no partial state.
     _reject_symlink(history_dir)
     _reject_symlink(sessions_dir)
-    for path in (archive_path, latest_path, resume_path, index_path):
+    for path in (archive_path, latest_path, resume_path, index_path, decisions_path):
         _reject_symlink(path)
 
     # Refuse to silently overwrite a different session that slugified to the same
@@ -216,9 +259,14 @@ def create_handoff(
     index = build_index(existing_index, handoff, archive_file)
     index_path.write_text(dump_mapping(index) + "\n", encoding="utf-8")
 
-    return {
+    # Append-only decisions log (side output). Only created once a session
+    # records a decision; deduped so a re-freeze never duplicates lines.
+    written = {
         "archive": archive_path,
         "latest": latest_path,
         "resume_prompt": resume_path,
         "index": index_path,
     }
+    if append_decisions(decisions_path, handoff):
+        written["decisions"] = decisions_path
+    return written

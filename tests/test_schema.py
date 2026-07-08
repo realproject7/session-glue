@@ -286,6 +286,38 @@ def test_active_context_files_accepts_scalars_and_mappings():
 
 
 # --------------------------------------------------------------------------- #
+# Optional decisions field (issue #44)
+# --------------------------------------------------------------------------- #
+
+
+def test_decisions_field_is_optional():
+    # valid.md carries no decisions and must still validate — absence is fine.
+    handoff = Handoff.from_text(_read("valid.md"))
+    assert "decisions" not in handoff.present_fields
+    assert handoff.validate() == []
+
+
+def test_scalar_decisions_validate():
+    frontmatter = _valid_frontmatter()
+    frontmatter["decisions"] = ["Chose polling over websockets", "Deferred rescale", 42]
+    assert Handoff.from_frontmatter(frontmatter).validate() == []
+
+
+def test_non_scalar_decision_entry_fails_with_clear_error():
+    frontmatter = _valid_frontmatter()
+    frontmatter["decisions"] = [{"why": "nested"}]
+    errors = Handoff.from_frontmatter(frontmatter).validate()
+    assert any("decisions[0] must be a scalar (string or number)" in e for e in errors)
+
+
+def test_non_list_decisions_fails():
+    frontmatter = _valid_frontmatter()
+    frontmatter["decisions"] = "just a string"
+    errors = Handoff.from_frontmatter(frontmatter).validate()
+    assert any("must be a list: decisions" in e for e in errors)
+
+
+# --------------------------------------------------------------------------- #
 # Derived artifacts
 # --------------------------------------------------------------------------- #
 

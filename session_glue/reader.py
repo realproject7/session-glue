@@ -17,7 +17,12 @@ from typing import Any
 
 from .schema import HandoffParseError, parse_mapping
 from .validator import validate_history
-from .writer import AGENT_HISTORY_DIRNAME, INDEX_FILENAME, RESUME_PROMPT_FILENAME
+from .writer import (
+    AGENT_HISTORY_DIRNAME,
+    DECISIONS_FILENAME,
+    INDEX_FILENAME,
+    RESUME_PROMPT_FILENAME,
+)
 
 # Compact fields surfaced by ``glue status``, in display order, mapped from
 # their ``INDEX.yaml`` keys. The full ``next_todo_items`` narrative is never
@@ -91,6 +96,23 @@ def session_count(index: dict[str, Any] | None) -> int:
         return 0
     sessions = index.get("sessions")
     return len(sessions) if isinstance(sessions, list) else 0
+
+
+def decision_count(repo_root: Path) -> int:
+    """Number of decisions logged in ``DECISIONS.md`` (a cheap file-line count).
+
+    Counts lines beginning with ``- [`` (one per logged decision) and returns 0
+    when the file is absent. Reads only ``DECISIONS.md`` — never ``INDEX.yaml`` or
+    a session narrative.
+    """
+    path = Path(repo_root) / AGENT_HISTORY_DIRNAME / DECISIONS_FILENAME
+    if not path.is_file():
+        return 0
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    return sum(1 for line in text.splitlines() if line.startswith("- ["))
 
 
 def read_resume_prompt(repo_root: Path) -> str | None:
