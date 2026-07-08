@@ -1,5 +1,7 @@
 # Session Glue
 
+[![CI](https://github.com/realproject7/session-glue/actions/workflows/ci.yml/badge.svg)](https://github.com/realproject7/session-glue/actions/workflows/ci.yml)
+
 Session Glue is a lightweight session-continuity protocol and CLI for coding agents.
 
 Its goal is simple: when an agent session gets too long, create a compact local handoff that lets the next session resume without dragging the full chat history forward.
