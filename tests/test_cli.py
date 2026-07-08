@@ -6,6 +6,7 @@ or user home access.
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pytest
@@ -132,3 +133,52 @@ def test_validate_has_no_allow_flagged_todo_flag(capsys):
         main(["validate", "--allow-flagged-todo", "--repo-root", "."])
     assert exc_info.value.code != 0
     assert "allow-flagged-todo" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# Issue #40: TTY stdin hint + scalar todo enforcement at the CLI.
+# --------------------------------------------------------------------------- #
+
+
+class _TTYStdin(io.StringIO):
+    """A stdin stand-in that reports it is an interactive terminal."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def test_create_hints_when_stdin_is_a_tty(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdin", _TTYStdin(VALID))
+    rc = main(["create", "--repo-root", str(tmp_path)])  # no --input -> stdin
+    assert rc == 0
+    assert "reading handoff from stdin" in capsys.readouterr().err
+    assert (tmp_path / ".agent-history" / "LATEST.md").is_file()
+
+
+def test_create_does_not_hint_for_piped_stdin(tmp_path, capsys, monkeypatch):
+    # io.StringIO.isatty() is False -> piped input; behavior is unchanged (no hint).
+    monkeypatch.setattr("sys.stdin", io.StringIO(VALID))
+    rc = main(["create", "--repo-root", str(tmp_path)])
+    assert rc == 0
+    assert "reading handoff from stdin" not in capsys.readouterr().err
+
+
+def test_create_does_not_hint_when_input_path_given(tmp_path, capsys, monkeypatch):
+    # Even at a TTY, an explicit --input path must not print the stdin hint.
+    monkeypatch.setattr("sys.stdin", _TTYStdin(""))
+    src = _write_handoff(tmp_path, VALID)
+    rc = main(["create", "--input", str(src), "--repo-root", str(tmp_path)])
+    assert rc == 0
+    assert "reading handoff from stdin" not in capsys.readouterr().err
+
+
+def test_create_rejects_mapping_todo_entry(tmp_path, capsys):
+    bad = VALID.replace(
+        '  - "Add polling lifecycle with cleanup"',
+        "  - task: Add polling lifecycle with cleanup",
+    )
+    src = _write_handoff(tmp_path, bad)
+    rc = main(["create", "--input", str(src), "--repo-root", str(tmp_path)])
+    assert rc == 2
+    assert "next_todo_items[0] must be a scalar" in capsys.readouterr().err
+    assert not (tmp_path / ".agent-history").exists()
