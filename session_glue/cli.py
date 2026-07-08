@@ -17,7 +17,12 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from . import __version__, installer, reader, validator, writer
-from .schema import Handoff, HandoffParseError, parse_frontmatter
+from .schema import (
+    Handoff,
+    HandoffParseError,
+    lint_first_next_action,
+    parse_frontmatter,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +63,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=".",
         metavar="PATH",
         help="Repository root that holds .agent-history/ (default: current directory).",
+    )
+    create.add_argument(
+        "--allow-flagged-todo",
+        action="store_true",
+        help=(
+            "Proceed even if next_todo_items[0] looks like a resume mechanic: "
+            "downgrade that lint failure to a loud stderr warning instead of "
+            "blocking the freeze. Other validation errors still block. This "
+            "escape hatch exists only on 'create'; 'validate' never gains it."
+        ),
     )
     create.set_defaults(func=_cmd_create)
 
@@ -161,6 +176,23 @@ def _cmd_create(args: argparse.Namespace) -> int:
 
     handoff = Handoff.from_frontmatter(frontmatter, body)
     errors = handoff.validate()
+
+    # Escape hatch: --allow-flagged-todo downgrades ONLY the resume-mechanic lint
+    # on next_todo_items[0] to a loud stderr warning so a heuristic false
+    # positive can never hard-block a freeze (losing context is the exact
+    # failure Session Glue exists to prevent). Every other validation error —
+    # including a missing/empty next_todo_items — still blocks.
+    if args.allow_flagged_todo and handoff.first_next_action is not None:
+        flagged = lint_first_next_action(handoff.first_next_action)
+        if flagged is not None and flagged in errors:
+            print(f"glue create: WARNING: {flagged}", file=sys.stderr)
+            print(
+                "glue create: proceeding anyway because --allow-flagged-todo "
+                "was passed.",
+                file=sys.stderr,
+            )
+            errors = [error for error in errors if error != flagged]
+
     if errors:
         print("glue create: handoff failed validation:", file=sys.stderr)
         for error in errors:

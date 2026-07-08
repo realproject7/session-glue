@@ -52,21 +52,44 @@ _LIST_FIELDS_ALLOW_EMPTY: frozenset[str] = frozenset(
     {"active_context_files", "completed_tasks", "known_issues"}
 )
 
-# Case-insensitive phrases that signal a resume mechanic rather than a
-# productive work item. Guardrail only — not a semantic judge.
+# Case-insensitive mechanic verb+object phrases that signal a resume mechanic
+# rather than a productive work item. Guardrail only — not a semantic judge.
+#
+# Each phrase is matched with word boundaries and whitespace-insensitive gaps
+# (see ``_MECHANIC_PATTERNS``), NOT as a bare substring. Bare tokens like
+# "paste", "new session", or "resume prompt" are deliberately avoided: they
+# false-positive on ordinary work items ("Add paste support…", "Implement the
+# new session naming scheme…", "Fix the resume prompt generator bug…"). Only a
+# concrete verb+object phrase ("paste the prompt", "start a new session",
+# "read latest.md") should trip the lint.
 RESUME_MECHANIC_PHRASES: tuple[str, ...] = (
-    "paste",
+    "paste the prompt",
+    "paste the resume prompt",
+    "paste resume prompt",
+    "paste resume_prompt",
     "start a new session",
-    "new session",
-    "read latest",
+    "start a new agent session",
     "read latest.md",
-    "resume prompt",
+    "read the handoff",
+    "read the latest handoff",
     "inspect the handoff",
     "inspect handoff",
-    "inspect latest",
+    "inspect latest.md",
     "verify that resume",
     "verify resume",
     "check whether the new agent",
+)
+
+# Precompiled word-boundary matchers for each phrase. Spaces in a phrase match
+# any run of whitespace, and ``\b`` anchors prevent partial-word hits (so
+# "paste the prompt" never matches inside "pasted" and "read latest.md" needs
+# the whole token). Text is lowercased before matching, so patterns are too.
+_MECHANIC_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
+    (
+        phrase,
+        re.compile(r"\b" + r"\s+".join(re.escape(word) for word in phrase.split()) + r"\b"),
+    )
+    for phrase in RESUME_MECHANIC_PHRASES
 )
 
 
@@ -341,8 +364,8 @@ def lint_first_next_action(item: Any) -> str | None:
     # Strip markdown code backticks so phrases match regardless of how the
     # action is typeset, e.g. "Inspect `LATEST.md`" -> "inspect latest.md".
     text = str(item).lower().replace("`", "")
-    for phrase in RESUME_MECHANIC_PHRASES:
-        if phrase in text:
+    for phrase, pattern in _MECHANIC_PATTERNS:
+        if pattern.search(text):
             return (
                 f"next_todo_items[0] looks like a resume mechanic "
                 f"(matched {phrase!r}); it must be the first productive work item"
