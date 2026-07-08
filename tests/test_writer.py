@@ -13,7 +13,7 @@ import pytest
 
 from session_glue import writer
 from session_glue.cli import main
-from session_glue.schema import Handoff, parse_mapping
+from session_glue.schema import Handoff, parse_frontmatter, parse_mapping
 
 FIXTURES = Path(__file__).parent / "fixtures" / "handoffs"
 VALID = (FIXTURES / "valid.md").read_text(encoding="utf-8")
@@ -115,6 +115,97 @@ def test_rerun_same_session_replaces_index_entry(tmp_path):
     index = parse_mapping((_history(tmp_path) / "INDEX.yaml").read_text(encoding="utf-8"))
     # Same session_id must not accumulate duplicate index entries.
     assert [s["session_id"] for s in index["sessions"]] == [SESSION_ID]
+
+
+# --------------------------------------------------------------------------- #
+# Archive slug-collision guard (issue #35)
+# --------------------------------------------------------------------------- #
+
+# Two distinct session_ids that slugify to the same archive base name.
+_COLLIDE_A = "team-alpha"
+_COLLIDE_B = "team/alpha"
+
+
+def test_slug_collision_pair_actually_collides():
+    # Guard the guard: if slugify ever changed so these no longer collide, the
+    # collision tests below would silently stop testing a collision.
+    assert writer.slugify_session_name(_COLLIDE_A) == writer.slugify_session_name(_COLLIDE_B)
+    assert _COLLIDE_A != _COLLIDE_B
+
+
+def test_slug_collision_different_session_id_fails_loud_with_no_partial_state(tmp_path):
+    assert _create(tmp_path, VALID.replace(SESSION_ID, _COLLIDE_A)) == 0
+    hist = _history(tmp_path)
+    slug = writer.slugify_session_name(_COLLIDE_A)
+    archive = hist / "sessions" / f"{slug}.md"
+
+    # Snapshot every artifact the first session produced.
+    before_archive = archive.read_text(encoding="utf-8")
+    before_latest = (hist / "LATEST.md").read_text(encoding="utf-8")
+    before_index = (hist / "INDEX.yaml").read_text(encoding="utf-8")
+    assert Handoff.from_text(before_archive).session_id == _COLLIDE_A
+
+    # A different session_id that collides on the slug must fail loud (rc 1 via
+    # the CLI's HandoffWriteError handler), not clobber the first session.
+    rc = _create(tmp_path, VALID.replace(SESSION_ID, _COLLIDE_B))
+    assert rc == 1
+
+    # No partial state: archive, LATEST.md, and INDEX.yaml are byte-for-byte
+    # unchanged, and there is still exactly one archive file.
+    assert archive.read_text(encoding="utf-8") == before_archive
+    assert (hist / "LATEST.md").read_text(encoding="utf-8") == before_latest
+    assert (hist / "INDEX.yaml").read_text(encoding="utf-8") == before_index
+    assert [p.name for p in (hist / "sessions").glob("*.md")] == [f"{slug}.md"]
+
+
+def test_slug_collision_error_is_raised_by_writer_directly(tmp_path):
+    # Direct-writer assertion that the failure is a HandoffWriteError naming both
+    # sessions, independent of the CLI exit-code mapping.
+    assert _create(tmp_path, VALID.replace(SESSION_ID, _COLLIDE_A)) == 0
+    text_b = VALID.replace(SESSION_ID, _COLLIDE_B)
+    frontmatter, body = parse_frontmatter(text_b)
+    handoff_b = Handoff.from_frontmatter(frontmatter, body)
+    with pytest.raises(writer.HandoffWriteError) as exc_info:
+        writer.create_handoff(
+            repo_root=tmp_path, frontmatter=frontmatter, body=body, handoff=handoff_b
+        )
+    message = str(exc_info.value)
+    assert _COLLIDE_A in message and _COLLIDE_B in message
+
+
+def test_same_session_id_recreate_still_overwrites(tmp_path):
+    # Idempotent re-freeze is preserved: the same session_id may be re-created,
+    # overwriting the archive with the newer body.
+    assert _create(tmp_path, VALID.replace(SESSION_ID, _COLLIDE_A)) == 0
+    updated = VALID.replace(SESSION_ID, _COLLIDE_A).replace(
+        "Add polling lifecycle with cleanup", "Add polling lifecycle with cleanup and retries"
+    )
+    assert _create(tmp_path, updated) == 0
+    hist = _history(tmp_path)
+    slug = writer.slugify_session_name(_COLLIDE_A)
+    archive = (hist / "sessions" / f"{slug}.md").read_text(encoding="utf-8")
+    assert "Add polling lifecycle with cleanup and retries" in archive
+    index = parse_mapping((hist / "INDEX.yaml").read_text(encoding="utf-8"))
+    # No duplicate archive files and no duplicate index entries.
+    assert [p.name for p in (hist / "sessions").glob("*.md")] == [f"{slug}.md"]
+    assert [s["session_id"] for s in index["sessions"]] == [_COLLIDE_A]
+
+
+def test_unparseable_existing_archive_is_not_clobbered(tmp_path):
+    assert _create(tmp_path, VALID.replace(SESSION_ID, _COLLIDE_A)) == 0
+    hist = _history(tmp_path)
+    slug = writer.slugify_session_name(_COLLIDE_A)
+    archive = hist / "sessions" / f"{slug}.md"
+
+    # Corrupt the on-disk archive so its frontmatter can no longer be parsed.
+    garbage = "this file is no longer a valid handoff\n"
+    archive.write_text(garbage, encoding="utf-8")
+
+    # Re-creating the SAME session_id must fail loud rather than silently clobber
+    # an archive we can't verify.
+    rc = _create(tmp_path, VALID.replace(SESSION_ID, _COLLIDE_A))
+    assert rc == 1
+    assert archive.read_text(encoding="utf-8") == garbage
 
 
 # --------------------------------------------------------------------------- #
