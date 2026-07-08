@@ -11,12 +11,18 @@ Write all files under the current repository root:
   LATEST.md
   RESUME_PROMPT.txt
   INDEX.yaml
+  DECISIONS.md
   sessions/
     <session_id>.md
 ```
 
 Never write outside `.agent-history/`. Refuse to follow symlinks that would
 redirect these writes outside the repository.
+
+`DECISIONS.md` is an append-only log of durable decisions. Add an optional `decisions:`
+list to the frontmatter (scalars — decisions made this session); `glue create` appends
+one line per entry and never rewrites existing lines. On resume, after reading
+`LATEST.md`, also read `DECISIONS.md` if present — one line per decision, cheap to scan.
 
 ## Handoff Markdown
 

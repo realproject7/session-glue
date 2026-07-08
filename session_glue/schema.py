@@ -363,6 +363,9 @@ class Handoff:
     known_issues: list[Any] = field(default_factory=list)
     search_tags: list[Any] = field(default_factory=list)
     validation: list[Any] = field(default_factory=list)
+    # Optional: durable decisions made this session (scalars). Absence is fine —
+    # not a required field. Appended to the append-only DECISIONS.md log.
+    decisions: list[Any] = field(default_factory=list)
     body: str = ""
     # Keys actually present in the source frontmatter (drives presence checks).
     present_fields: frozenset[str] = field(default_factory=frozenset)
@@ -450,6 +453,20 @@ class Handoff:
                 # ``notes`` is optional commentary — command + result are the
                 # machine-checkable record; forcing notes on every entry only
                 # produces boilerplate filler.
+
+        # ``decisions`` is optional: absence is fine. When present it must be a
+        # list of scalars (one durable decision per entry) so each line appends
+        # cleanly to DECISIONS.md without rendering a Python repr.
+        if "decisions" in self.present_fields:
+            if not isinstance(self.decisions, list):
+                errors.append("optional field must be a list: decisions")
+            else:
+                for idx, item in enumerate(self.decisions):
+                    if not isinstance(item, (str, int)):
+                        errors.append(
+                            f"decisions[{idx}] must be a scalar (string or number), "
+                            f"not {type(item).__name__}"
+                        )
 
         if "next_todo_items" in self.present_fields:
             lint = lint_first_next_action(self.first_next_action)

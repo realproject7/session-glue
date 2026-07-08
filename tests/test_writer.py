@@ -130,6 +130,59 @@ def test_rerun_same_session_replaces_index_entry(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Append-only decisions log (issue #44)
+# --------------------------------------------------------------------------- #
+
+_DECISIONS_FRONT = (
+    "status: in_progress\n"
+    "decisions:\n"
+    '  - "Chose polling over websockets for simplicity"\n'
+    '  - "Deferred the Y-axis rescale fix"\n'
+)
+VALID_WITH_DECISIONS = VALID.replace("status: in_progress\n", _DECISIONS_FRONT, 1)
+
+
+def _decisions_lines(tmp_path: Path) -> list[str]:
+    text = (_history(tmp_path) / "DECISIONS.md").read_text(encoding="utf-8")
+    return [ln for ln in text.splitlines() if ln.startswith("- [")]
+
+
+def test_no_decisions_creates_no_decisions_file(tmp_path):
+    _create(tmp_path, VALID)  # valid.md carries no decisions
+    assert not (_history(tmp_path) / "DECISIONS.md").exists()
+
+
+def test_first_create_writes_decisions_header_and_lines(tmp_path):
+    _create(tmp_path, VALID_WITH_DECISIONS)
+    text = (_history(tmp_path) / "DECISIONS.md").read_text(encoding="utf-8")
+    assert text.startswith("# Decisions\n")
+    assert "Append-only log of durable decisions" in text
+    lines = _decisions_lines(tmp_path)
+    assert lines == [
+        f"- [2026-06-30][{SESSION_ID}] Chose polling over websockets for simplicity",
+        f"- [2026-06-30][{SESSION_ID}] Deferred the Y-axis rescale fix",
+    ]
+
+
+def test_rerun_same_session_does_not_duplicate_decisions(tmp_path):
+    _create(tmp_path, VALID_WITH_DECISIONS)
+    _create(tmp_path, VALID_WITH_DECISIONS)
+    assert len(_decisions_lines(tmp_path)) == 2  # deduped, not 4
+
+
+def test_second_session_appends_after_first(tmp_path):
+    _create(tmp_path, VALID_WITH_DECISIONS)
+    second = VALID_WITH_DECISIONS.replace(SESSION_ID, "2026-07-01-0900-second")
+    second = second.replace("Deferred the Y-axis rescale fix", "Adopted the DECISIONS.md log")
+    _create(tmp_path, second)
+    lines = _decisions_lines(tmp_path)
+    # First session's two lines are preserved (append-only), second session adds its own.
+    assert len(lines) == 4
+    assert lines[0] == f"- [2026-06-30][{SESSION_ID}] Chose polling over websockets for simplicity"
+    assert any("2026-07-01-0900-second] Adopted the DECISIONS.md log" in ln for ln in lines)
+
+
+# --------------------------------------------------------------------------- #
 # Archive slug-collision guard (issue #35)
 # --------------------------------------------------------------------------- #
 
@@ -316,6 +369,17 @@ def test_symlinked_output_file_is_rejected(tmp_path):
     rc = _create_in(repo, VALID)
     assert rc == 1
     # The symlink target outside the repo must not have been created/written.
+    assert not evil.exists()
+
+
+def test_symlinked_decisions_file_is_rejected(tmp_path):
+    repo, outside = _repo_and_outside(tmp_path)
+    (repo / ".agent-history").mkdir()
+    evil = outside / "stolen-decisions.md"
+    (repo / ".agent-history" / "DECISIONS.md").symlink_to(evil)
+    rc = _create_in(repo, VALID_WITH_DECISIONS)
+    assert rc == 1
+    # The write is rejected before any output, so nothing leaks through the symlink.
     assert not evil.exists()
 
 

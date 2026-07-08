@@ -108,6 +108,48 @@ def test_reader_status_helpers_are_index_only():
     assert reader.session_count({"sessions": "oops-not-a-list"}) == 0
 
 
+# --------------------------------------------------------------------------- #
+# Decisions count (issue #44)
+# --------------------------------------------------------------------------- #
+
+
+def test_status_reports_decisions_count_zero_when_absent(tmp_path, capsys):
+    _build_history(tmp_path)  # valid.md has no decisions -> no DECISIONS.md
+    assert not (tmp_path / ".agent-history" / "DECISIONS.md").exists()
+    capsys.readouterr()
+    assert main(["status", "--repo-root", str(tmp_path)]) == 0
+    assert "decisions: 0" in capsys.readouterr().out
+
+
+def test_status_reports_decisions_count(tmp_path, capsys):
+    src = tmp_path / "in.md"
+    src.write_text(
+        VALID.replace(
+            "status: in_progress\n",
+            'status: in_progress\ndecisions:\n  - "Chose polling"\n  - "Deferred rescale"\n',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    assert main(["create", "--input", str(src), "--repo-root", str(tmp_path)]) == 0
+    capsys.readouterr()
+    main(["status", "--repo-root", str(tmp_path)])
+    assert "decisions: 2" in capsys.readouterr().out
+
+
+def test_decision_count_reads_only_the_decisions_file(tmp_path):
+    hist = tmp_path / ".agent-history"
+    hist.mkdir()
+    assert reader.decision_count(tmp_path) == 0  # absent -> 0
+    (hist / "DECISIONS.md").write_text(
+        "# Decisions\n\nheader prose, not a decision line\n"
+        "- [2026-06-30][s1] one\n"
+        "- [2026-06-30][s2] two\n",
+        encoding="utf-8",
+    )
+    assert reader.decision_count(tmp_path) == 2  # only '- [' lines counted
+
+
 def test_status_handles_missing_history(tmp_path, capsys):
     code = main(["status", "--repo-root", str(tmp_path)])
     assert code == 1

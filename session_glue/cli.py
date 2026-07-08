@@ -314,6 +314,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
     lifecycle = reader.latest_status(index)
     print(f"status: {lifecycle if lifecycle not in (None, '') else '(unknown)'}")
     print(f"sessions: {reader.session_count(index)}")
+    # Cheap file-line count of the append-only decisions log (0 when absent).
+    print(f"decisions: {reader.decision_count(Path(args.repo_root))}")
 
     if status.problems:
         print(f"validation: {len(status.problems)} problem(s)")
