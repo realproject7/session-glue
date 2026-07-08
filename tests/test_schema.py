@@ -255,9 +255,7 @@ def test_validation_result_must_be_a_known_value():
 
 def test_validation_not_run_result_is_allowed():
     frontmatter = _valid_frontmatter()
-    frontmatter["validation"] = [
-        {"command": "npm run typecheck", "result": "not_run", "notes": "Deferred"}
-    ]
+    frontmatter["validation"] = [{"command": "npm run typecheck", "result": "not_run"}]
     assert Handoff.from_frontmatter(frontmatter).validate() == []
 
 
@@ -268,11 +266,12 @@ def test_validation_entry_requires_a_command():
     assert any("validation[0].command is required" in e for e in errors)
 
 
-def test_validation_entry_requires_notes():
+def test_validation_notes_is_optional():
+    # Per the clarified contract: command + result are required, notes is optional
+    # commentary — an entry with no notes still validates.
     frontmatter = _valid_frontmatter()
-    frontmatter["validation"] = [{"command": "npm test", "result": "passed"}]  # no notes
-    errors = Handoff.from_frontmatter(frontmatter).validate()
-    assert any("validation[0].notes is required" in e for e in errors)
+    frontmatter["validation"] = [{"command": "npm test", "result": "passed"}]
+    assert Handoff.from_frontmatter(frontmatter).validate() == []
 
 
 def test_active_context_files_accepts_scalars_and_mappings():
