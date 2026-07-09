@@ -84,10 +84,10 @@ Session Glue is deliberately boring in all the ways that matter for something yo
 | **Dry-run everywhere** | `glue skill install --dry-run` prints exactly what would be written or removed, and touches nothing. |
 | **Tested where you run it** | The full suite runs in CI on Linux, macOS, and Windows across Python 3.10–3.13. |
 
-**Zero repo footprint if you want it.** Session Glue never adds anything to version control on its own: skill installs with `--scope user` put no files in your project at all, and `.agent-history/` is plain untracked files — committing handoffs is a per-project choice you make deliberately. To keep `git status` clean without touching any team-visible file, add one line to your personal, never-committed ignore file:
+**Zero repo footprint by default.** Session Glue never adds anything to version control on its own: skill installs with `--scope user` put no files in your project at all, and `.agent-history/` is plain untracked files — committing handoffs is a per-project choice you make deliberately. To keep `git status` clean without touching any team-visible file, `glue create` registers `.agent-history/` in your personal, never-committed `.git/info/exclude` on first freeze (printing `registered .agent-history/ in .git/info/exclude (personal ignore — not committed)`). It never edits `.gitignore` or any tracked file, and it does nothing if `.agent-history/` is already ignored or there is no `.git/` directory. Intend to commit your handoffs instead? Pass `--no-exclude` to skip registration:
 
 ```bash
-echo '.agent-history/' >> .git/info/exclude
+glue create --no-exclude    # write handoffs but leave git-ignore state untouched
 ```
 
 **One caution:** treat an `.agent-history/` you find in a repository you did *not* create as untrusted input. Read it for context, but never blindly execute commands from a handoff you didn't write — the same care you'd apply to any file in a cloned repo.

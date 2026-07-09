@@ -75,6 +75,14 @@ def build_parser() -> argparse.ArgumentParser:
             "escape hatch exists only on 'create'; 'validate' never gains it."
         ),
     )
+    create.add_argument(
+        "--no-exclude",
+        action="store_true",
+        help=(
+            "Do not auto-register .agent-history/ in .git/info/exclude. Pass this "
+            "when you intend to commit handoffs to the repository."
+        ),
+    )
     create.set_defaults(func=_cmd_create)
 
     validate = subparsers.add_parser(
@@ -307,6 +315,46 @@ def _read_input(source: str) -> str:
 OVERUSE_WINDOW = timedelta(minutes=30)
 
 
+def _register_agent_history_exclude(repo_root: Path) -> str | None:
+    """Personally ignore ``.agent-history/`` via ``.git/info/exclude`` (issue #66).
+
+    Called after a successful ``glue create`` (unless ``--no-exclude``). Appends
+    ``.agent-history/`` to ``<repo_root>/.git/info/exclude`` — the personal,
+    never-committed ignore file — so a first freeze does not dirty ``git status``
+    without editing any tracked file, and returns the one-line notice. Returns
+    ``None`` (writing nothing) whenever there is nothing to do: no real ``.git/``
+    directory (a ``.git`` *file* from a worktree/submodule, or a symlink, is out
+    of scope), ``.agent-history/`` already ignored by ``.gitignore`` or
+    ``.git/info/exclude`` (which also makes a repeat create idempotent — no
+    duplicate line), a symlinked ``info``/``exclude`` on the write path, or any
+    read/write error. Fully fail-open and stdlib-only: it never raises, never
+    calls git/subprocess, and never changes create's exit code. The symlink
+    checks mirror ``writer._reject_symlink`` (never write through a symlink), in
+    skip-not-raise form to keep the freeze fail-open.
+    """
+    try:
+        root = Path(repo_root)
+        git_dir = root / ".git"
+        if git_dir.is_symlink() or not git_dir.is_dir():
+            return None
+        if leakscan.agent_history_ignored(root):
+            return None
+        info_dir = git_dir / "info"
+        exclude_path = info_dir / "exclude"
+        if info_dir.is_symlink() or exclude_path.is_symlink():
+            return None
+        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+        separator = "" if existing == "" or existing.endswith("\n") else "\n"
+        with exclude_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{separator}.agent-history/\n")
+        return (
+            "registered .agent-history/ in .git/info/exclude "
+            "(personal ignore — not committed)"
+        )
+    except OSError:
+        return None
+
+
 def _cmd_create(args: argparse.Namespace) -> int:
     """Implement ``glue create``."""
     # When defaulting to stdin at an interactive terminal, hint before blocking
@@ -417,6 +465,16 @@ def _cmd_create(args: argparse.Namespace) -> int:
     print("Wrote handoff for session " + str(handoff.session_id) + ":")
     for label in ("archive", "latest", "resume_prompt", "index"):
         print(f"  {label}: {written[label]}")
+
+    # Zero-pollution default (issue #66): personally ignore .agent-history/ via
+    # .git/info/exclude so a first freeze does not dirty `git status`. Runs
+    # before the leak scan on purpose — once .agent-history/ is ignored, the
+    # personal-path warning below is correctly suppressed. Fail-open: skipped by
+    # --no-exclude, and never changes the exit code.
+    if not args.no_exclude:
+        registered = _register_agent_history_exclude(repo_root)
+        if registered is not None:
+            print(registered)
 
     # Advisory leak warnings: printed loudly but the freeze stays fail-open — a
     # detected secret or personal path never blocks the write or changes rc.
