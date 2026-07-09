@@ -62,6 +62,20 @@ def test_bundled_assets_are_readable_resources():
         assert _read_pkg_bytes("claude", rel).strip(), f"claude/{rel} is empty"
 
 
+def test_bundled_assets_are_lf_only():
+    """Bundled skill assets must contain no CRLF bytes (issue #61).
+
+    The cross-platform byte-stability contract: a Windows checkout or a
+    Windows-built wheel must ship the same bytes as a Linux/macOS one. The new
+    ``.gitattributes`` pins LF on checkout; this guards the shipped package
+    payload directly (read through ``importlib.resources``) so a stray ``\\r\\n``
+    can never slip into a distribution regardless of the builder's OS.
+    """
+    for agent, files in (("codex", CODEX_FILES), ("claude", CLAUDE_FILES)):
+        for rel in files:
+            assert b"\r\n" not in _read_pkg_bytes(agent, rel), f"CRLF in {agent}/{rel}"
+
+
 def test_skill_dir_rejects_unknown_agent():
     with pytest.raises(ValueError):
         assets.skill_dir("emacs")

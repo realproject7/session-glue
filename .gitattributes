@@ -1,0 +1,11 @@
+# Pin LF line endings for all text files so packaged asset bytes are stable
+# across platforms — a Windows checkout or Windows-built wheel must ship the
+# same bytes as a Linux/macOS one (issue #61). No binary files are tracked, so
+# no binary rules are declared (add `*.ext binary` only if real binaries land).
+* text=auto eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.txt text eol=lf
