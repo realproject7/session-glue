@@ -14,4 +14,5 @@ build/
 *.egg-info/
 .eggs/
 .agent-history/
-/docs/
+/docs/*
+!/docs/agent-surfaces.md
