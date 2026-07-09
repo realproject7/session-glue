@@ -70,12 +70,36 @@ def test_agent_history_ignored_variants(tmp_path):
     assert leakscan.agent_history_ignored(tmp_path) is False
 
 
+def test_agent_history_ignored_via_git_info_exclude(tmp_path):
+    # .git/info/exclude coverage counts the same as .gitignore coverage (#66),
+    # with the same bare/trailing-slash/anchor + comment handling.
+    info = tmp_path / ".git" / "info"
+    info.mkdir(parents=True)
+    exclude = info / "exclude"
+    assert leakscan.agent_history_ignored(tmp_path) is False  # empty repo, no exclude
+    for line in (".agent-history", ".agent-history/", "/.agent-history"):
+        exclude.write_text(f"# header\n{line}\n", encoding="utf-8")
+        assert leakscan.agent_history_ignored(tmp_path) is True, line
+    exclude.write_text("# .agent-history commented out\n", encoding="utf-8")
+    assert leakscan.agent_history_ignored(tmp_path) is False
+
+
 def test_scan_handoff_gates_personal_path_on_gitignore(tmp_path):
     text = f"context file at {HOME_PATH}"
     # Not gitignored -> personal-path warning present.
     assert any("personal absolute path" in w for w in leakscan.scan_handoff(text, tmp_path))
     # Gitignored -> no personal-path warning (the path is never committed).
     (tmp_path / ".gitignore").write_text(".agent-history/\n", encoding="utf-8")
+    assert leakscan.scan_handoff(text, tmp_path) == []
+
+
+def test_scan_handoff_personal_path_suppressed_by_git_info_exclude(tmp_path):
+    # Coverage via the personal exclude file suppresses the path warning too.
+    text = f"context file at {HOME_PATH}"
+    assert any("personal absolute path" in w for w in leakscan.scan_handoff(text, tmp_path))
+    info = tmp_path / ".git" / "info"
+    info.mkdir(parents=True)
+    (info / "exclude").write_text(".agent-history/\n", encoding="utf-8")
     assert leakscan.scan_handoff(text, tmp_path) == []
 
 

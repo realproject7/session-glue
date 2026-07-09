@@ -59,17 +59,16 @@ def find_personal_paths(text: str) -> list[str]:
     return matches
 
 
-def agent_history_ignored(repo_root: Path) -> bool:
-    """Return True if ``<repo_root>/.gitignore`` ignores ``.agent-history``.
-
-    Intentionally a simple line scan (no full ``.gitignore`` grammar, no git
-    subprocess): a non-comment line that is ``.agent-history`` — bare, with a
-    trailing slash, or with a leading anchor slash — counts as coverage.
-    """
+def _read_ignore_lines(path: Path) -> list[str]:
+    """Return the lines of ``path``, or ``[]`` if it cannot be read."""
     try:
-        lines = (Path(repo_root) / ".gitignore").read_text(encoding="utf-8").splitlines()
+        return path.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return False
+        return []
+
+
+def _covers_agent_history(lines: list[str]) -> bool:
+    """Return True if any non-comment ``lines`` entry ignores ``.agent-history``."""
     for raw in lines:
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -77,6 +76,23 @@ def agent_history_ignored(repo_root: Path) -> bool:
         if line.lstrip("/").rstrip("/") == ".agent-history":
             return True
     return False
+
+
+def agent_history_ignored(repo_root: Path) -> bool:
+    """Return True if ``.agent-history`` is ignored for ``repo_root``.
+
+    Checks the two ignore surfaces that keep ``.agent-history/`` out of a commit:
+    the committed ``<repo_root>/.gitignore`` and the personal, never-committed
+    ``<repo_root>/.git/info/exclude`` (which ``glue create`` auto-registers,
+    issue #66). Both use the same ``.gitignore`` pattern syntax, so the same
+    intentionally-simple line scan applies to each — no full grammar, no git
+    subprocess: a non-comment line that is ``.agent-history`` — bare, with a
+    trailing slash, or with a leading anchor slash — counts as coverage.
+    """
+    root = Path(repo_root)
+    if _covers_agent_history(_read_ignore_lines(root / ".gitignore")):
+        return True
+    return _covers_agent_history(_read_ignore_lines(root / ".git" / "info" / "exclude"))
 
 
 def scan_handoff(text: str, repo_root: Path) -> list[str]:

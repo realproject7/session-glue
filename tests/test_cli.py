@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from session_glue import __version__
+from session_glue import __version__, leakscan
 from session_glue.cli import build_parser, main
 from session_glue.schema import Handoff
 
@@ -258,3 +258,121 @@ def test_no_overuse_warning_on_first_ever_freeze(tmp_path, capsys):
     # No prior LATEST.md exists, so the guard has nothing to compare against.
     assert _create_cli(tmp_path, VALID) == 0
     assert "you glued" not in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# Zero-pollution default: auto-register .agent-history/ in .git/info/exclude
+# (issue #66)
+# --------------------------------------------------------------------------- #
+
+_REGISTERED_LINE = (
+    "registered .agent-history/ in .git/info/exclude (personal ignore — not committed)"
+)
+# A default-style git exclude file: comment-only, like a fresh `git init`.
+_GIT_EXCLUDE_HEADER = (
+    "# git ls-files --others --exclude-from=.git/info/exclude\n"
+    "# Lines that start with '#' are comments.\n"
+)
+
+
+def _init_git_repo(repo: Path) -> Path:
+    """Create a minimal ``.git/info/exclude`` (no real git) and return its path."""
+    info = repo / ".git" / "info"
+    info.mkdir(parents=True)
+    exclude = info / "exclude"
+    exclude.write_text(_GIT_EXCLUDE_HEADER, encoding="utf-8")
+    return exclude
+
+
+def test_create_registers_agent_history_in_git_exclude(tmp_path, capsys):
+    exclude = _init_git_repo(tmp_path)
+    assert _create_cli(tmp_path, VALID) == 0
+    assert _REGISTERED_LINE in capsys.readouterr().out
+    assert ".agent-history/" in exclude.read_text(encoding="utf-8").splitlines()
+    # .gitignore is never touched — the write is personal-only.
+    assert not (tmp_path / ".gitignore").exists()
+    # Now recognized as ignored, so leakscan stops warning about it.
+    assert leakscan.agent_history_ignored(tmp_path) is True
+
+
+def test_second_create_does_not_duplicate_exclude_line(tmp_path, capsys):
+    exclude = _init_git_repo(tmp_path)
+    assert _create_cli(tmp_path, VALID) == 0
+    capsys.readouterr()
+    assert _create_cli(tmp_path, VALID) == 0
+    # Nothing to register the second time — already covered.
+    assert _REGISTERED_LINE not in capsys.readouterr().out
+    assert exclude.read_text(encoding="utf-8").count(".agent-history/") == 1
+
+
+def test_create_skips_exclude_when_gitignore_already_covers(tmp_path, capsys):
+    exclude = _init_git_repo(tmp_path)
+    original = exclude.read_text(encoding="utf-8")
+    (tmp_path / ".gitignore").write_text(".agent-history/\n", encoding="utf-8")
+    assert _create_cli(tmp_path, VALID) == 0
+    assert _REGISTERED_LINE not in capsys.readouterr().out
+    assert exclude.read_text(encoding="utf-8") == original  # exclude untouched
+
+
+def test_create_no_exclude_flag_skips_registration(tmp_path, capsys):
+    exclude = _init_git_repo(tmp_path)
+    original = exclude.read_text(encoding="utf-8")
+    src = _write_handoff(tmp_path, VALID)
+    rc = main(["create", "--input", str(src), "--repo-root", str(tmp_path), "--no-exclude"])
+    assert rc == 0
+    assert _REGISTERED_LINE not in capsys.readouterr().out
+    assert exclude.read_text(encoding="utf-8") == original
+    assert leakscan.agent_history_ignored(tmp_path) is False
+
+
+def test_create_non_git_dir_skips_registration_silently(tmp_path, capsys):
+    # No .git/ at all: registration is a silent no-op and the write still succeeds.
+    assert _create_cli(tmp_path, VALID) == 0
+    assert _REGISTERED_LINE not in capsys.readouterr().out
+    assert not (tmp_path / ".git").exists()
+    assert (tmp_path / ".agent-history" / "LATEST.md").is_file()
+
+
+def test_create_git_file_not_dir_skips_registration(tmp_path, capsys):
+    # A `.git` *file* (worktree/submodule pointer) is out of scope; leave it be.
+    gitfile = tmp_path / ".git"
+    gitfile.write_text("gitdir: /elsewhere/.git/worktrees/x\n", encoding="utf-8")
+    assert _create_cli(tmp_path, VALID) == 0
+    assert _REGISTERED_LINE not in capsys.readouterr().out
+    assert gitfile.read_text(encoding="utf-8") == "gitdir: /elsewhere/.git/worktrees/x\n"
+
+
+def test_create_unwritable_exclude_skips_silently(tmp_path, capsys):
+    exclude = _init_git_repo(tmp_path)
+    original = exclude.read_text(encoding="utf-8")
+    exclude.chmod(0o444)
+    # Only meaningful where the OS actually blocks the append (skip e.g. as root).
+    try:
+        with exclude.open("a", encoding="utf-8"):
+            pass
+    except OSError:
+        pass
+    else:
+        exclude.chmod(0o644)
+        pytest.skip("filesystem does not enforce read-only append here")
+    try:
+        rc = _create_cli(tmp_path, VALID)
+    finally:
+        exclude.chmod(0o644)  # restore so tmp cleanup can remove it
+    assert rc == 0  # fail-open: an unwritable exclude never changes the exit code
+    assert _REGISTERED_LINE not in capsys.readouterr().out
+    assert exclude.read_text(encoding="utf-8") == original  # untouched
+
+
+def test_create_symlinked_exclude_is_not_followed(tmp_path, capsys):
+    exclude = _init_git_repo(tmp_path)
+    exclude.unlink()
+    outside = tmp_path / "outside-exclude"
+    outside.write_text("", encoding="utf-8")
+    try:
+        exclude.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+    assert _create_cli(tmp_path, VALID) == 0
+    assert _REGISTERED_LINE not in capsys.readouterr().out
+    assert outside.read_text(encoding="utf-8") == ""  # symlink target never written
