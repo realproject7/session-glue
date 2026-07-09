@@ -9,8 +9,16 @@ Releases are built and published from CI going forward.
 
 ## [Unreleased]
 
-### Added
+_Nothing yet._
 
+## [0.2.0] - 2026-07-09
+
+### Added
+- `glue skill list/show/install/uninstall` for Codex and Claude: install the bundled skill into a dedicated repo- or user-scope folder (`.agents/skills/` / `.claude/skills/`), with dry-run, managed-files-only replace/uninstall, and symlink guards. Global instruction files are never modified.
+- Handoffs now require `primary_goal`, `search_tags`, and a `validation` record (`command`/`result`; `notes` optional), and `active_context_files` entries may carry a `reason` — mirrored into `INDEX.yaml` so topical lookup works from the index alone.
+- Optional `decisions:` frontmatter appends to an append-only `.agent-history/DECISIONS.md` log, so durable decisions survive across sessions verbatim.
+- Optional `supersedes:` session links, a `glue close --status DONE|BLOCKED|ABANDONED` lifecycle command (INDEX-only; archives stay immutable), and a lineage line in `glue status`.
+- Handoff bodies must carry the eight canonical narrative sections, and `glue create` warns when the previous freeze was under 30 minutes old.
 - `glue validate` and `glue status` accept an optional `--git` flag that warns when the recorded head commit or branch has drifted from the working repository.
 - `glue create` warns when a handoff appears to contain secret-like values or personal absolute paths.
 - `glue validate` now runs stronger cross-file consistency checks between `LATEST.md`, `INDEX.yaml`, and archived sessions.
@@ -25,7 +33,7 @@ Releases are built and published from CI going forward.
 
 ### Fixed
 
-- Corrected a lint false-positive that rejected valid flagged-todo handoffs.
+- Corrected lint false positives that rejected ordinary productive work items as resume mechanics.
 - Added a slug-collision guard so distinct sessions no longer overwrite one another's archived files.
 
 ## [0.1.0] - 2026-07-01
