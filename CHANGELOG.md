@@ -11,6 +11,17 @@ Releases are built and published from CI going forward.
 
 _Nothing yet._
 
+## [0.3.0] - 2026-07-09
+
+### Added
+
+- Zero-pollution default: the first `glue create` in a git repository registers `.agent-history/` in `.git/info/exclude` — the personal, never-committed ignore file — so `git status` stays clean without modifying any tracked file. Opt out with `--no-exclude` if you intend to commit handoffs. The leak scanner recognizes both `.gitignore` and `.git/info/exclude` coverage.
+- `.gitattributes` pins LF line endings for all text files, and a new packaging test guards that bundled skill assets contain no CRLF — a wheel built on Windows now ships byte-identical assets to one built on Linux or macOS.
+
+### Changed
+
+- README rebuilt around the product story, user benefits, and the trust posture (zero dependencies, no daemon/network/clipboard, repo-local writes only), with an accurate description of the repository footprint.
+
 ## [0.2.0] - 2026-07-09
 
 ### Added

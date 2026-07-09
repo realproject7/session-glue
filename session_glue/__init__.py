@@ -6,6 +6,6 @@ Cut a bloated coding-agent session at a clean boundary, then glue the useful
 context onto the next session.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = ["__version__"]
