@@ -1,16 +1,17 @@
 """Install bundled agent skills into dedicated skill folders (``glue skill``).
 
-This implements the ``glue skill`` command family (issue #29): it copies the
-package-bundled skill folder for an agent (Codex today) out of
+This implements the ``glue skill`` command family (issues #29 and #28): it copies
+the package-bundled skill folder for an agent (Codex or Claude) out of
 ``session_glue/assets/skills/<agent>/session-glue/`` into an explicit repo- or
-user-scope target, and removes it again. It only ever touches the dedicated
-``.agents/skills/session-glue/`` folder — never ``AGENTS.md`` or any global
-instruction file, and nothing outside the two documented target paths.
+user-scope target, and removes it again. It only ever touches that agent's
+dedicated skill folder (Codex ``.agents/skills/session-glue/``, Claude
+``.claude/skills/session-glue/``) — never ``AGENTS.md``, ``CLAUDE.md``, or any
+global instruction file, and nothing outside the documented target paths.
 
 Assets are read through :mod:`session_glue.assets` (``importlib.resources``), so
-this works from an installed wheel without a source checkout. The set of managed
-files is derived from the bundle itself, so adding a new agent (e.g. Claude in
-#28) is a data change — appending to :data:`SUPPORTED_AGENTS` — not a redesign.
+this works from an installed wheel without a source checkout. The managed file
+set is derived from the bundle, and each agent's target is data in
+:data:`SKILL_SUBPATHS`, so adding an agent is a data change — not a redesign.
 """
 
 from __future__ import annotations
@@ -20,14 +21,21 @@ from pathlib import Path
 
 from . import assets
 
-# Agents the ``glue skill`` CLI supports. Codex only in #29; #28 adds "claude"
-# as a data change once its command coverage lands.
-SUPPORTED_AGENTS: tuple[str, ...] = ("codex",)
-
-# Install scopes and the target folder layout, relative to the scope root. Both
-# scopes share the layout; only the root differs (repo_root vs $HOME).
+# Install scopes.
 SCOPES: tuple[str, ...] = ("repo", "user")
-SKILL_SUBPATH = Path(".agents") / "skills" / "session-glue"
+
+# Per-agent install subpath, relative to the scope root. Codex keeps its
+# original ``.agents/...`` location; Claude installs under ``.claude/...``. An
+# agent's layout is the same in both scopes — only the root differs (repo_root
+# vs $HOME). Adding an agent is a data change here; the plan/apply flow below is
+# agent-agnostic.
+SKILL_SUBPATHS: dict[str, Path] = {
+    "codex": Path(".agents") / "skills" / "session-glue",
+    "claude": Path(".claude") / "skills" / "session-glue",
+}
+
+# Agents the ``glue skill`` CLI supports (the keys of SKILL_SUBPATHS).
+SUPPORTED_AGENTS: tuple[str, ...] = tuple(SKILL_SUBPATHS)
 
 
 class SkillInstallError(Exception):
@@ -92,9 +100,12 @@ def scope_root(scope: str, repo_root: str | Path = ".", home: str | Path | None 
     raise SkillInstallError(f"unknown scope: {scope!r}; expected one of {SCOPES}")
 
 
-def skill_target(scope: str, repo_root: str | Path = ".", home: str | Path | None = None) -> Path:
-    """Absolute target skill folder for ``scope``."""
-    return scope_root(scope, repo_root, home) / SKILL_SUBPATH
+def skill_target(
+    agent: str, scope: str, repo_root: str | Path = ".", home: str | Path | None = None
+) -> Path:
+    """Absolute target skill folder for ``agent`` in ``scope``."""
+    _require_supported(agent)
+    return scope_root(scope, repo_root, home) / SKILL_SUBPATHS[agent]
 
 
 def bundle_present(agent: str) -> bool:
@@ -154,7 +165,7 @@ def plan_install(
     """Validate and plan an install; raise :class:`SkillInstallError` if unsafe."""
     files = managed_files(agent)  # validates the agent and derives the file set
     root = scope_root(scope, repo_root, home)
-    target = root / SKILL_SUBPATH
+    target = root / SKILL_SUBPATHS[agent]
     plan = SkillPlan(agent=agent, scope=scope, target=target, root=root)
 
     _reject_symlink(target)
@@ -210,7 +221,7 @@ def plan_uninstall(
     """Validate and plan an uninstall; raise if not installed or unsafe."""
     files = managed_files(agent)  # validates the agent and derives the file set
     root = scope_root(scope, repo_root, home)
-    target = root / SKILL_SUBPATH
+    target = root / SKILL_SUBPATHS[agent]
     plan = SkillPlan(agent=agent, scope=scope, target=target, root=root)
 
     if not target.exists() and not target.is_symlink():
