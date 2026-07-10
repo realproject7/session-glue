@@ -26,20 +26,43 @@ The usual escape hatch is "paste a messy summary into a new chat and hope." Sess
 
 Session Glue cuts one long conversation into two clean ones — and carries the **work** across the gap while letting the **chat** die.
 
-```mermaid
-flowchart LR
-    A["Session 1<br/>long, costly, drifting"]
-    B["Agent writes a<br/>structured handoff"]
-    C["LATEST.md +<br/>RESUME_PROMPT.txt<br/>(files on disk)"]
-    D["chat history<br/>discarded"]
-    E["Session 2<br/>fresh, clean context"]
-    F["reads one small file,<br/>continues the real work"]
-
-    A -->|"freeze this session"| B
-    B --> C
-    A -.->|"reset — no daemon to keep alive"| D
-    C -->|"paste the resume prompt"| E
-    E --> F
+```text
+┌──────────────────────────────────────────────────┐
+│ SESSION 1                                        │
+│ long, costly, the agent is losing the plot       │
+└──────────────────────────────────────────────────┘
+                          │
+                          │  you: "freeze this session"
+                          ▼
+┌──────────────────────────────────────────────────┐
+│ the agent writes a structured handoff into       │
+│ .agent-history/  ->  goal, active files,         │
+│ what's done, what's next, how it's verified      │
+└──────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌──────────────────────────────────────────────────┐
+│ two small files remain on disk:                  │
+│    LATEST.md          the briefing               │
+│    RESUME_PROMPT.txt   paste-ready prompt        │
+│ the chat history is discarded -- no daemon,      │
+│ nothing left running                             │
+└──────────────────────────────────────────────────┘
+                          │
+                          │  reset the session,
+                          │  then paste the resume prompt
+                          ▼
+┌──────────────────────────────────────────────────┐
+│ SESSION 2                                        │
+│ fresh, clean context                             │
+└──────────────────────────────────────────────────┘
+                          │
+                          │  reads ONE small file -- no repo re-scan
+                          ▼
+┌──────────────────────────────────────────────────┐
+│ continues the real work,                         │
+│ exactly where session 1 left off                 │
+└──────────────────────────────────────────────────┘
 ```
 
 The expensive, drifting part — the raw chat history — is thrown away. What survives is the handoff: goal, constraints, what's done, what's next, and how to verify it, written as a few small files in your repo. A fresh session reads one of them and is instantly oriented, with no repo re-scan and no transcript to replay.
