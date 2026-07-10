@@ -24,60 +24,115 @@ The usual escape hatch is "paste a messy summary into a new chat and hope." Sess
 
 ## How it works
 
-The whole loop is four steps:
+Session Glue cuts one long conversation into two clean ones — and carries the **work** across the gap while letting the **chat** die.
 
-```text
-1. /glue                     agent writes a structured handoff into .agent-history/
-2. (reset the session)       no background process — nothing to keep alive
-3. paste RESUME_PROMPT.txt   one prompt, generated for you
-4. the new session resumes   reads one small file, then continues the actual work
+```mermaid
+flowchart LR
+    A["Session 1<br/>long, costly, drifting"]
+    B["Agent writes a<br/>structured handoff"]
+    C["LATEST.md +<br/>RESUME_PROMPT.txt<br/>(files on disk)"]
+    D["chat history<br/>discarded"]
+    E["Session 2<br/>fresh, clean context"]
+    F["reads one small file,<br/>continues the real work"]
+
+    A -->|"freeze this session"| B
+    B --> C
+    A -.->|"reset — no daemon to keep alive"| D
+    C -->|"paste the resume prompt"| E
+    E --> F
 ```
 
-Everything lives in a repo-local `.agent-history/` directory:
+The expensive, drifting part — the raw chat history — is thrown away. What survives is the handoff: goal, constraints, what's done, what's next, and how to verify it, written as a few small files in your repo. A fresh session reads one of them and is instantly oriented, with no repo re-scan and no transcript to replay.
 
-```text
-.agent-history/
-├── LATEST.md            # the current handoff — the one file a new session reads
-├── RESUME_PROMPT.txt    # the exact prompt to paste into the next session
-├── INDEX.yaml           # compact, grep-able metadata for every session
-├── DECISIONS.md         # append-only log of durable decisions
-└── sessions/            # immutable archive of every handoff
-```
+### What that looks like on a real task
 
-Each handoff is validated before it is written: required fields (goal, active files with *reasons*, what was tried, what's next, how it was verified, search tags), the eight canonical narrative sections, and a guard that rejects a useless first todo like "read the handoff" — the next action must be real work.
+In one project (call it **Project A**), an agent had spent a long, sprawling session coordinating a staging deployment: several PRs merged, an audit run, and one stubborn blocker — a server that still needed redeploying before a feature would work. The session also carried hard-won operational context that lived **only** in the chat:
 
-## Install
+> the local checkout is dirty and must not be touched · deploy from `origin/main` in a clean throwaway worktree · the server is a file snapshot, not a git repo · preserve its env file.
 
-Session Glue is a command-line tool, so install it with [pipx](https://pipx.pypa.io/) — it puts `glue` on your `PATH` in an isolated environment:
+One "freeze this session" captured all of it. Then a **brand-new** agent — with none of that history — pasted the resume prompt, read a single file, and:
+
+- picked up the blocker as its first action,
+- deployed from a clean worktree **without touching the user's dirty local work** — because the handoff said so,
+- ran a full browser + websocket smoke test, and
+- reported back to the team,
+
+without re-deriving a single piece of that context. The naive alternative — "paste a summary into a new chat and hope" — loses exactly the non-obvious constraints that separate a safe deploy from a broken one. That gap is what Session Glue closes.
+
+## Getting started
+
+Session Glue is deliberately a plain command-line tool — **not** a daemon, an MCP server, or a background service. Nothing runs in the background, nothing listens on a port, nothing needs keeping patched. Setup is two one-time commands; after that you just talk to your agent.
+
+**1 · Install the CLI** (once per machine). It's a [pipx](https://pipx.pypa.io/) tool with **zero runtime dependencies** — pipx gives it an isolated environment and puts `glue` on your `PATH`:
 
 ```bash
 pipx install session-glue        # or: uv tool install session-glue
 ```
 
-If you don't have pipx: `brew install pipx` (macOS) or `python3 -m pip install --user pipx`, then `pipx ensurepath` and reopen your terminal.
+<details>
+<summary>No pipx yet, or on macOS / Homebrew Python?</summary>
 
-> **On macOS / Homebrew Python?** A plain `pip install` (or `pip3 install`) will fail with an `externally-managed-environment` error — that's [PEP 668](https://peps.python.org/pep-0668/) protecting your system Python, not a problem with the package. Use `pipx` as above (recommended), or install into a virtual environment (`python3 -m venv .venv && source .venv/bin/activate && pip install session-glue`).
+Get pipx with `brew install pipx` (macOS) or `python3 -m pip install --user pipx`, then run `pipx ensurepath` and reopen your terminal.
 
-## Quick start
+A plain `pip install` on Homebrew or system Python fails with `externally-managed-environment` — that's [PEP 668](https://peps.python.org/pep-0668/) protecting your system Python, not a problem with the package. Use `pipx` (recommended), or a virtualenv (`python3 -m venv .venv && source .venv/bin/activate && pip install session-glue`).
+</details>
+
+**2 · Teach your agents the protocol** (once per machine). Rather than editing your global agent config, Session Glue ships as a **skill** — a small, self-contained folder your agent auto-discovers. Installing it never touches `CLAUDE.md`, `AGENTS.md`, or any global file:
 
 ```bash
-# teach your agent the protocol — once per machine, works in every project
 glue skill install claude --scope user    # -> ~/.claude/skills/session-glue/
 glue skill install codex  --scope user    # -> ~/.agents/skills/session-glue/
 ```
 
-`--scope user` installs into your home directory and is auto-discovered in every project. Prefer per-project (and committable, to share with a team)? Use `--scope repo`, which installs into `.claude/skills/` or `.agents/skills/` under the current repo.
+`--scope user` installs to your home directory and works in **every** project — do it once, anywhere. (Want to commit the skill and share it with a team? Use `--scope repo` to install it under the current repo instead.)
 
-Then, in your agent session, say `/glue` (or "freeze this session", `/handoff`, `/checkpoint`). The agent writes the handoff, the CLI stores and validates it, and you get a copy-paste resume prompt for the next session.
+**3 · Just talk to your agent.** In any session, say **"freeze this session"** (or `/session-glue`, `/handoff`, `/checkpoint`, "세션 얼려줘"). The agent writes the handoff, `glue create` stores and validates it, and you get a copy-paste resume prompt — paste it into a fresh session to continue.
 
-## What you get
+And your repo stays clean the whole time: on the first freeze, Session Glue quietly registers `.agent-history/` in your personal `.git/info/exclude` — never the shared `.gitignore`, never a tracked file — so `git status` stays spotless with zero effort on your part. That restraint is the whole design philosophy; see [Built to be trusted](#built-to-be-trusted) for everything it deliberately refuses to do.
 
-- **Cheaper, better sessions.** A resume costs roughly one small file read plus a `git status` — instead of a full repo re-scan or a 100k-token chat history carried turn after turn. The fresh session also *reasons* better, because its context holds only what matters.
-- **Cross-agent portability.** The handoff is plain markdown + YAML. The same `.agent-history/` has been verified end-to-end by fresh Claude Code **and** Codex sessions, each resuming correctly with zero broad scanning.
-- **Decisions that survive.** Decisions recorded at freeze time land in an append-only `DECISIONS.md` — one line each — so a decision made five sessions ago is still honored, verbatim, instead of being re-litigated.
-- **A searchable work history.** "Which session dealt with the installer?" is answerable from `INDEX.yaml` alone — goals, tags, status, and next actions for every session, ready for `grep`/`rg`.
-- **Drift you can see.** Handoffs record the branch and commit they were written at; `glue status --git` / `glue validate --git` warn when the repo has moved since.
-- **A repeatable ritual, not a platform.** Freeze, reset, paste, continue. No memory infrastructure to operate.
+## Anatomy & design
+
+Session Glue draws one firm line: **the agent supplies judgment, the CLI supplies determinism.**
+
+| The agent decides | The CLI guarantees |
+|---|---|
+| what context matters, what's done, what's next, which files are active | deterministic writes, indexing, and validation |
+| how to summarize the session it actually lived through | that a malformed or lossy handoff is **refused**, never silently saved |
+
+The agent — the only party that has the conversation — writes the summary. The CLI never calls an LLM and never guesses; it stores, indexes, validates, and fails loudly.
+
+### The artifacts
+
+A freeze produces a small, purpose-built file set under a repo-local `.agent-history/`:
+
+```text
+.agent-history/
+├── LATEST.md            # the resume target — the ONE file a new session reads first
+├── RESUME_PROMPT.txt    # the exact prompt you paste to start the next session
+├── INDEX.yaml           # compact, grep-able metadata per session — a lookup surface, never the source of truth
+├── DECISIONS.md         # append-only: durable decisions, one line each, kept across sessions
+└── sessions/            # immutable archive — every handoff, kept forever
+```
+
+### A schema that forces a good handoff
+
+A handoff is not free-form prose. Each one is validated before it is written, and the required fields are chosen so that a **bad** handoff cannot be saved silently:
+
+- a one-line **goal**, and **active files each with a `reason`** — so the next agent opens the right two files, not the whole repo;
+- **completed work**, **known issues**, and a **validation record** (commands run, and what passed / failed / was not run);
+- **search tags**, so the session is findable from `INDEX.yaml` months later;
+- a **productive first next-action** — a guard rejects a useless `next_todo_items[0]` like "read the handoff"; it must be real work;
+- the **eight canonical narrative sections** (what happened · decided · failed · next · risks); and
+- **no empty or truncated entries** — every list item is checked.
+
+Two optional fields extend the model without taxing the common case: `decisions:` appends to `DECISIONS.md`, and `supersedes:` links a handoff to the one it replaces, so a chain stays traversable from `glue status`. Complete examples live in `tests/fixtures/handoffs/`; the full contract is in the bundled skill's `references/protocol.md`.
+
+### What the structure buys you
+
+- **Cheap, sharp resumes** — one small file read plus a `git status`, not a repo re-scan or a 100k-token transcript carried turn after turn. Because the fresh context holds only what matters, the agent also *reasons* better.
+- **Cross-agent portability** — plain markdown + YAML; the same `.agent-history/` has been driven end-to-end by fresh Claude Code **and** Codex sessions, each resuming with zero broad scanning.
+- **Decisions that don't decay** — `DECISIONS.md` keeps them verbatim across dozens of sessions instead of re-litigating them.
+- **Drift you can see** — handoffs record the branch and commit they were written at; `glue status --git` / `glue validate --git` warn when the repo has moved on.
 
 ## Built to be trusted
 
@@ -120,10 +175,6 @@ glue skill uninstall claude --scope repo|user [--dry-run]
 ```
 
 `session-glue` is available as a fallback executable, and `python -m session_glue` also works. The legacy `glue install <agent> --dry-run` (global instruction-file preview) is superseded by `glue skill install` and remains print-only.
-
-## The handoff format, in brief
-
-YAML frontmatter carries the structured state — session id, branch/commit, goal, active files with reasons, completed work, **productive** next steps, known issues, validation record, search tags, optional decisions and supersession links. Below it, eight canonical narrative sections tell the next agent what happened, what was decided, what failed, and what to do — in prose. See `tests/fixtures/handoffs/` for complete examples, and the bundled skill's `references/protocol.md` for the full contract.
 
 ## Development
 
