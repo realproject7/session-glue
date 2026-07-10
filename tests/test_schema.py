@@ -238,6 +238,24 @@ def test_empty_search_tags_fails_validation():
     assert any("search_tags" in e for e in errors)
 
 
+def test_empty_string_list_entry_fails_validation():
+    # #72 hardening: an empty-string entry inside a required list field is now a
+    # clear per-index validation error, closing the second half of the silence
+    # (previously ["a", "b", ""] passed clean). Distinct from an empty *list*.
+    frontmatter = _valid_frontmatter()
+    frontmatter["completed_tasks"] = ["a", "b", ""]
+    errors = Handoff.from_frontmatter(frontmatter, _VALID_BODY).validate()
+    assert "completed_tasks[2] must not be empty" in errors
+
+
+def test_present_but_empty_list_still_allowed():
+    # The empty-entry check must NOT change the present-but-empty *list* rule for
+    # fields in _LIST_FIELDS_ALLOW_EMPTY (an empty list has no entries to reject).
+    frontmatter = _valid_frontmatter()
+    frontmatter["completed_tasks"] = []
+    assert Handoff.from_frontmatter(frontmatter, _VALID_BODY).validate() == []
+
+
 def test_missing_validation_fails_validation():
     frontmatter = _valid_frontmatter()
     del frontmatter["validation"]
@@ -499,19 +517,53 @@ def test_multiline_values_rejected_with_clear_message(text):
     assert "one line" in message
 
 
-def test_inline_comment_after_unquoted_scalar_is_stripped():
-    # Behavior 3: `# ...` preceded by whitespace is a comment and dropped.
-    assert parse_mapping("head_commit: abc1234 # short sha")["head_commit"] == "abc1234"
+def test_inline_hash_after_value_is_literal_content():
+    # #72 regression (inverts the removed #37 stripping test): a `#` preceded by
+    # whitespace is literal content, NOT a comment — issue references survive.
+    assert (
+        parse_mapping("primary_goal: Continue playtest coordination after #207 merge")[
+            "primary_goal"
+        ]
+        == "Continue playtest coordination after #207 merge"
+    )
+
+
+def test_inline_hash_in_list_item_is_literal_content():
+    # #72 regression: a `#`-leading list item is preserved as a full entry, not
+    # emptied to "" (the real production data-loss case).
+    assert parse_mapping("completed_tasks:\n  - #214 merged and deployed")[
+        "completed_tasks"
+    ] == ["#214 merged and deployed"]
+
+
+def test_value_starting_with_hash_is_literal_content():
+    # #72 regression: a value whose first character is `#` is literal content.
+    assert parse_mapping("primary_goal: #207 must ship")["primary_goal"] == "#207 must ship"
 
 
 def test_hash_inside_quoted_string_stays_literal():
-    # Behavior 3: a `#` inside a quoted string is NOT a comment.
+    # A `#` inside a quoted string is literal content.
     assert parse_mapping('note: "release # 5"')["note"] == "release # 5"
 
 
-def test_hash_glued_to_text_is_not_a_comment():
-    # Behavior 3: a `#` not preceded by whitespace stays part of the value.
+def test_hash_glued_to_text_is_literal_content():
+    # A `#` not preceded by whitespace stays part of the value.
     assert parse_mapping("lang: C#sharp")["lang"] == "C#sharp"
+
+
+def test_whole_line_comment_is_still_skipped():
+    # #72: removing inline-comment stripping must NOT affect whole-line comments —
+    # a line whose stripped form starts with `#` is still skipped, in both the
+    # top-level mapping and inside a block sequence.
+    parsed = parse_mapping(
+        "# a whole-line comment\n"
+        "agent: codex\n"
+        "completed_tasks:\n"
+        "  # a comment inside the sequence\n"
+        "  - #214 merged\n"
+    )
+    assert parsed["agent"] == "codex"
+    assert parsed["completed_tasks"] == ["#214 merged"]
 
 
 def test_duplicate_top_level_key_raises_naming_the_key():
@@ -542,12 +594,13 @@ def test_numeric_hash_round_trips_as_string():
     assert isinstance(reparsed["head_commit"], str)
 
 
-def test_comment_stripped_value_round_trips_stably():
-    # Behavior 3 round-trip: the first parse drops the comment; the cleaned
-    # value is then stable across parse -> dump -> parse.
-    once = parse_mapping("head_commit: abc1234 # sha")
-    assert once == {"head_commit": "abc1234"}
-    assert parse_mapping(dump_mapping(once)) == once
+def test_hash_value_round_trips_stably():
+    # #72 round-trip (replaces the removed #37 comment round-trip test): a value
+    # containing `#` survives parse -> dump -> parse unchanged. `_dump_scalar`
+    # quotes any `#`-containing string, so the canonical form is unambiguous.
+    data = {"primary_goal": "after #207 merge", "completed_tasks": ["#214 merged"]}
+    reparsed = parse_mapping(dump_mapping(data))
+    assert reparsed == data
 
 
 # --------------------------------------------------------------------------- #
