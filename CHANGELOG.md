@@ -11,6 +11,13 @@ Releases are built and published from CI going forward.
 
 _Nothing yet._
 
+## [0.3.1] - 2026-07-10
+
+### Fixed
+
+- Handoff values containing a `#` — most importantly GitHub issue/PR references such as `#207` — are no longer silently truncated. A `#` is now literal content everywhere; inline comments are not supported (only whole-line comments). This was a data-loss regression in 0.2.0–0.3.0: an agent writing `after #207 merge` had it stored as `after`, and a list item like `#214 merged` was emptied entirely. If you have handoffs written with 0.2.0–0.3.0, re-freeze from the original session to recover truncated text.
+- `glue validate` now rejects empty-string entries in list fields, so a truncated or blank entry fails loudly per index instead of passing silently.
+
 ## [0.3.0] - 2026-07-09
 
 ### Added
