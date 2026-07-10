@@ -74,7 +74,7 @@ validation:
     notes: Deferred to the next session.
 ```
 
-Values must be single-line, and inline `#` comments after values are treated as comments.
+Values must be single-line. A `#` inside a value is literal content — issue references like `#207` are safe unquoted; inline `#` comments after values are NOT supported. Only whole-line comments (a line whose first non-space character is `#`) are treated as comments.
 
 Canonicalization: `glue create` re-serializes this frontmatter when it archives the
 handoff. Comments are dropped, quoting is normalized, and only single-line values are

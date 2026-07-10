@@ -140,27 +140,15 @@ _INT_RE = re.compile(r"-?\d+$")
 _BLOCK_SCALAR_RE = re.compile(r"[|>][-+]?\d*$")
 
 
-def _strip_inline_comment(token: str) -> str:
-    """Strip an inline ``#`` comment from an unquoted scalar.
-
-    A ``#`` that starts the value or is preceded by whitespace begins a comment;
-    everything from there on is dropped. A ``#`` glued to other characters (e.g.
-    ``C#`` or ``a#b``) is kept as part of the value. Callers only apply this to
-    unquoted scalars, so a ``#`` inside a quoted string stays literal.
-    """
-    for i, ch in enumerate(token):
-        if ch == "#" and (i == 0 or token[i - 1] in " \t"):
-            return token[:i]
-    return token
-
-
 def _parse_scalar(token: str) -> Any:
     """Parse a single scalar value (quoted string, ``[]`` literal, or bare string).
 
     Double-quoted strings are unescaped so they round-trip with
-    :func:`_dump_scalar`, which escapes ``\\`` and ``"``; a ``#`` inside a quoted
-    string stays literal. For an unquoted scalar, an inline ``#`` comment is
-    stripped. The literal ``[]`` is the only flow-style form accepted and parses
+    :func:`_dump_scalar`, which escapes ``\\`` and ``"``. A ``#`` is literal
+    content everywhere — inside both quoted strings and bare scalars (issue
+    references like ``#207`` are common handoff vocabulary); inline comments are
+    NOT supported, only whole-line comments. The literal ``[]`` is the only
+    flow-style form accepted and parses
     to an empty list (``[a, b]`` is deliberately unsupported and stays a string,
     which then fails the list-field check loudly). Integers are NOT coerced here:
     all-digit values keep their literal string so identifiers like a numeric
@@ -175,7 +163,6 @@ def _parse_scalar(token: str) -> Any:
             # ``\\`` -> ``\`` and ``\"`` -> ``"``.
             inner = re.sub(r"\\(.)", lambda m: m.group(1), inner)
         return inner
-    token = _strip_inline_comment(token).strip()
     if token == "[]":
         return []
     return token
@@ -429,8 +416,16 @@ class Handoff:
                 # ``next_todo_items[0]`` silently degrade to a single character.
                 if not isinstance(value, list):
                     errors.append(f"required field must be a list: {name}")
-                elif name not in _LIST_FIELDS_ALLOW_EMPTY and len(value) == 0:
+                    continue
+                if name not in _LIST_FIELDS_ALLOW_EMPTY and len(value) == 0:
                     errors.append(f"required field is empty: {name}")
+                # No individual list entry may be an empty/blank string. This is
+                # the second half of the #72 fix: even if a value were somehow
+                # emptied, an empty entry now fails loudly per index instead of
+                # passing validation silently.
+                for idx, item in enumerate(value):
+                    if isinstance(item, str) and not item.strip():
+                        errors.append(f"{name}[{idx}] must not be empty")
                 continue
             if value is None or (isinstance(value, str) and len(value) == 0):
                 errors.append(f"required field is empty: {name}")
