@@ -46,15 +46,27 @@ Everything lives in a repo-local `.agent-history/` directory:
 
 Each handoff is validated before it is written: required fields (goal, active files with *reasons*, what was tried, what's next, how it was verified, search tags), the eight canonical narrative sections, and a guard that rejects a useless first todo like "read the handoff" — the next action must be real work.
 
+## Install
+
+Session Glue is a command-line tool, so install it with [pipx](https://pipx.pypa.io/) — it puts `glue` on your `PATH` in an isolated environment:
+
+```bash
+pipx install session-glue        # or: uv tool install session-glue
+```
+
+If you don't have pipx: `brew install pipx` (macOS) or `python3 -m pip install --user pipx`, then `pipx ensurepath` and reopen your terminal.
+
+> **On macOS / Homebrew Python?** A plain `pip install` (or `pip3 install`) will fail with an `externally-managed-environment` error — that's [PEP 668](https://peps.python.org/pep-0668/) protecting your system Python, not a problem with the package. Use `pipx` as above (recommended), or install into a virtual environment (`python3 -m venv .venv && source .venv/bin/activate && pip install session-glue`).
+
 ## Quick start
 
 ```bash
-pipx install session-glue        # or: uv tool install session-glue / pip install session-glue
-
-# teach your agent the protocol (repo-scoped, dedicated folders only)
-glue skill install claude --scope repo    # -> .claude/skills/session-glue/
-glue skill install codex  --scope repo    # -> .agents/skills/session-glue/
+# teach your agent the protocol — once per machine, works in every project
+glue skill install claude --scope user    # -> ~/.claude/skills/session-glue/
+glue skill install codex  --scope user    # -> ~/.agents/skills/session-glue/
 ```
+
+`--scope user` installs into your home directory and is auto-discovered in every project. Prefer per-project (and committable, to share with a team)? Use `--scope repo`, which installs into `.claude/skills/` or `.agents/skills/` under the current repo.
 
 Then, in your agent session, say `/glue` (or "freeze this session", `/handoff`, `/checkpoint`). The agent writes the handoff, the CLI stores and validates it, and you get a copy-paste resume prompt for the next session.
 
