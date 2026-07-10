@@ -27,42 +27,25 @@ The usual escape hatch is "paste a messy summary into a new chat and hope." Sess
 Session Glue cuts one long conversation into two clean ones — and carries the **work** across the gap while letting the **chat** die.
 
 ```text
-┌──────────────────────────────────────────────────┐
-│ SESSION 1                                        │
-│ long, costly, the agent is losing the plot       │
-└──────────────────────────────────────────────────┘
-                          │
-                          │  you: "freeze this session"
-                          ▼
-┌──────────────────────────────────────────────────┐
-│ the agent writes a structured handoff into       │
-│ .agent-history/  ->  goal, active files,         │
-│ what's done, what's next, how it's verified      │
-└──────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌──────────────────────────────────────────────────┐
-│ two small files remain on disk:                  │
-│    LATEST.md          the briefing               │
-│    RESUME_PROMPT.txt   paste-ready prompt        │
-│ the chat history is discarded -- no daemon,      │
-│ nothing left running                             │
-└──────────────────────────────────────────────────┘
-                          │
-                          │  reset the session,
-                          │  then paste the resume prompt
-                          ▼
-┌──────────────────────────────────────────────────┐
-│ SESSION 2                                        │
-│ fresh, clean context                             │
-└──────────────────────────────────────────────────┘
-                          │
-                          │  reads ONE small file -- no repo re-scan
-                          ▼
-┌──────────────────────────────────────────────────┐
-│ continues the real work,                         │
-│ exactly where session 1 left off                 │
-└──────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│ SESSION 1  —  long, costly, losing the plot        │
+└────────────────────────────────────────────────────┘
+                           │
+                           │  you say "freeze this session"
+                           ▼
+┌────────────────────────────────────────────────────┐
+│ a small handoff is saved to .agent-history/        │
+│ (goal, files, done, next, how to verify);          │
+│ the chat is discarded -- no daemon, no server      │
+└────────────────────────────────────────────────────┘
+                           │
+                           │  open a fresh session,
+                           │  paste the resume prompt
+                           ▼
+┌────────────────────────────────────────────────────┐
+│ SESSION 2  —  reads one file, continues the        │
+│ work exactly where session 1 left off              │
+└────────────────────────────────────────────────────┘
 ```
 
 The expensive, drifting part — the raw chat history — is thrown away. What survives is the handoff: goal, constraints, what's done, what's next, and how to verify it, written as a few small files in your repo. A fresh session reads one of them and is instantly oriented, with no repo re-scan and no transcript to replay.
