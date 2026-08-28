@@ -25,6 +25,7 @@ from session_glue import cli, vaultgit
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 CHANGELOG = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+AGENT_SURFACES = (REPO_ROOT / "docs" / "agent-surfaces.md").read_text(encoding="utf-8")
 
 
 def _help_for(*argv: str) -> str:
@@ -218,8 +219,31 @@ def test_documented_exit_codes_match_the_implementation():
 # --------------------------------------------------------------------------- #
 
 
+def test_agent_surfaces_records_the_vault_boundary_without_adding_behavior():
+    """Every installer target inherits the same rule, so the research doc states it.
+
+    Deliberately a pointer: the canonical text is the bundled protocol, and this
+    doc must not become a second place where the boundary is defined and can
+    drift.
+    """
+    boundary = AGENT_SURFACES.split("## Requirement", 1)[0]
+    assert "The default is **local**" in boundary
+    assert "the command, the vault path, and the project ID" in boundary
+    assert "never retries, polls, or\n  synchronizes on its own initiative" in boundary
+    assert "references/protocol.md" in boundary
+    # A pointer, not a fork of the contract.
+    assert "adds no behavior of its own" in boundary
+    # The installer research it sits above must survive intact.
+    for agent in ("## Cursor", "## Gemini CLI", "## OpenCode"):
+        assert agent in AGENT_SURFACES
+
+
 def test_docs_contain_no_personal_path_or_credential_shaped_text():
     banned = ("/home/", "/Users/", "C:\\Users", "BEGIN RSA", "AKIA", "xoxb-")
-    for name, text in (("README.md", README), ("CHANGELOG.md", CHANGELOG)):
+    for name, text in (
+        ("README.md", README),
+        ("CHANGELOG.md", CHANGELOG),
+        ("docs/agent-surfaces.md", AGENT_SURFACES),
+    ):
         for needle in banned:
             assert needle not in text, f"{name} contains {needle!r}"
