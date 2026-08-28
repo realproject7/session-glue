@@ -977,6 +977,54 @@ def read_vault_decisions(namespace: Path, admitted: set[str] | None = None) -> s
         return ""
     return _read_text(Path(namespace), Path(namespace) / DECISIONS_FILENAME)
 
+
+def reject_duplicate_session_ids(archives: dict[str, str], origin: str) -> None:
+    """Refuse when one ``session_id`` claims more than one relative path.
+
+    State references a session by id, availability reduces ids to a *set*, and
+    :func:`rebuild_derived` resolves the head with the first insertion-order
+    match — so two archives sharing an id make the derived views depend on
+    filename sort order rather than on anything the operator chose. A lexically
+    earlier duplicate then supplies ``LATEST.md``, ``INDEX.yaml`` and the resume
+    prompt (#115).
+
+    Refusing rather than picking is the point: any tie-break is a silent choice
+    between two documents claiming to be the same session, and the wrong one is
+    indistinguishable from the right one afterwards.
+
+    Both sides are checked. Admission (#110/#112) is a *transport* property that
+    never applies to `.agent-history`, so the local set needs this too: an
+    ordinary ``writer.create_handoff(archive_name=…)`` re-freeze under a second
+    name produces a duplicate that `validate_history` reports as clean and that
+    an ordinary push publishes to every device that later pulls.
+
+    The message names the id and both paths because this refusal blocks pull,
+    push *and* resolve — "duplicate session id" alone is not a recovery path.
+    It deliberately does **not** name a recovery command: #116 owns that tool and
+    has not shipped, and an error that tells an operator to run something that
+    does not exist is worse than one that tells them what to do by hand.
+    """
+    by_session: dict[str, list[str]] = {}
+    for relative_path in sorted(archives):
+        session_id = _session_id_of(archives[relative_path])
+        if session_id:
+            by_session.setdefault(session_id, []).append(relative_path)
+    duplicates = {
+        session_id: paths for session_id, paths in by_session.items() if len(paths) > 1
+    }
+    if not duplicates:
+        return
+    raise VaultError(
+        f"duplicate session id in the {origin} archives; refusing rather than "
+        "choosing one by filename order:\n  "
+        + "\n  ".join(
+            f"{session_id}: " + ", ".join(paths)
+            for session_id, paths in sorted(duplicates.items())
+        )
+        + "\nKeep one archive per session id: rename the session in one of them, "
+        "or move the extra copy out of the sessions directory."
+    )
+
 # --------------------------------------------------------------------------- #
 # Operations
 # --------------------------------------------------------------------------- #
@@ -1297,6 +1345,9 @@ def export_project(
     local_archives = read_local_archives(root)
     if not local_archives:
         raise VaultError("local history has no archives to export")
+    # Before canonicalization, publication and staging: a duplicate must never
+    # reach the gate's `changed` set or `content` (#115).
+    reject_duplicate_session_ids(local_archives, "local")
     canonical = {path: canonicalize_document(text) for path, text in local_archives.items()}
 
     bootstrap = _namespace_is_bootstrap(namespace, read_sync_state(root))
@@ -1306,6 +1357,7 @@ def export_project(
     # the gate's `changed` comparison and the published `content` must all see
     # the same admitted set, or an unknown file would still steer one of them.
     vault_archives = {} if bootstrap else read_vault_archives(namespace, admitted)
+    reject_duplicate_session_ids(vault_archives, "vault")
     vault_state = {"head_session_id": "", "lifecycle": [], "acknowledgements": []}
     if not bootstrap:
         vault_state = read_state(namespace)
@@ -1446,11 +1498,15 @@ def import_project(
     vault_archives = read_vault_archives(namespace, admitted)
     if not vault_archives:
         raise VaultUnavailable("vault not fully available: no archives under sessions/")
+    reject_duplicate_session_ids(vault_archives, "vault")
 
     materialized = {
         path: materialize_document(text, root) for path, text in vault_archives.items()
     }
     local_archives = read_local_archives(root)
+    # The local set is checked too: pre-#112 residue lives here, and the union
+    # below inserts it first, so a local duplicate takes the head (#116).
+    reject_duplicate_session_ids(local_archives, "local")
     # Merged rather than the vault's list alone: `merge_lifecycle` adopts a
     # one-sided entry, so taking the vault's list would drop a local-only entry
     # silently. Its disagreements are the lifecycle half of the divergence check.
@@ -1671,8 +1727,13 @@ def resolve_project(
         if side not in ("local", "vault"):
             raise VaultError(f"unknown conflict side {side!r}: expected 'local' or 'vault'")
 
+    local_archives = read_local_archives(root)
+    # Resolve publishes any local-only archive, so an unchecked duplicate here
+    # propagates to every later puller while the publishing operator's own
+    # derived views stay correct — it is the one path that hides its own damage.
+    reject_duplicate_session_ids(local_archives, "local")
     local_canonical = {
-        path: canonicalize_document(text) for path, text in read_local_archives(root).items()
+        path: canonicalize_document(text) for path, text in local_archives.items()
     }
     vault_state = read_state(namespace)
     # Same admission as the export path. Resolve already gates every artifact it
@@ -1680,6 +1741,7 @@ def resolve_project(
     # must not be able to demand an acknowledgement, nor be published once one is
     # given (#110).
     vault_archives = read_vault_archives(namespace, admitted)
+    reject_duplicate_session_ids(vault_archives, "vault")
 
     by_session_local = {_session_id_of(t): (p, t) for p, t in local_canonical.items()}
     by_session_vault = {_session_id_of(t): (p, t) for p, t in vault_archives.items()}
