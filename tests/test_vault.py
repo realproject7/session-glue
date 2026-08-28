@@ -3144,3 +3144,31 @@ def test_a_failed_quarantine_move_reverses_its_earlier_moves(checkout, monkeypat
     assert {p.name: p.read_bytes() for p in
             (checkout / writer.AGENT_HISTORY_DIRNAME / vault.SESSIONS_DIRNAME).glob("*.md")} == before
     assert not list((checkout / writer.AGENT_HISTORY_DIRNAME).glob("quarantine-*"))
+
+
+def test_a_failed_rollback_write_leaves_no_staging_residue(checkout, monkeypatch):
+    """RE2's finding: `_atomic_write` omitted `_write_recorded`'s cleanup.
+
+    A half-written sibling is still a file the history did not have before, and
+    this is the *restoration* path — AC3 constrains it to exact pre-command
+    bytes **and presence**, so residue from a failed rollback violates the very
+    thing the rollback promised. The failure is also reported rather than
+    escaping, because AC2 requires every restore failure to be actionable.
+    """
+    history = checkout / writer.AGENT_HISTORY_DIRNAME
+    snapshot = vault.snapshot_local_artifacts(checkout)
+    (history / "INDEX.yaml").write_text("rewritten by this operation\n", encoding="utf-8")
+    ledger = {"INDEX.yaml": "rewritten by this operation\n"}
+    real = os.replace
+
+    def failing(source, target):
+        if str(target).endswith("INDEX.yaml"):
+            raise OSError("injected failure inside the rollback")
+        return real(source, target)
+
+    monkeypatch.setattr(vault.os, "replace", failing)
+
+    collisions = vault.restore_local_artifacts(checkout, snapshot, ledger)
+
+    assert collisions == ["INDEX.yaml"], "the rollback failure was not reported"
+    assert not list(history.glob("*.partial")), "a half-written sibling was left behind"

@@ -1388,7 +1388,9 @@ def snapshot_local_artifacts(repo_root: Path | str) -> dict[str, str | None]:
     history_dir = root / writer.AGENT_HISTORY_DIRNAME
     guard_contained_path(root, history_dir)
     snapshot: dict[str, str | None] = {}
-    for name in (*_REPLACE_TAIL, DECISIONS_FILENAME, SYNC_STATE_FILENAME):
+    # `_REPLACE_TAIL` already carries DECISIONS.md, LATEST.md, INDEX.yaml and
+    # RESUME_PROMPT.txt; only the sync state is additional.
+    for name in (*_REPLACE_TAIL, SYNC_STATE_FILENAME):
         target = history_dir / name
         guard_contained_path(root, target)
         try:
@@ -1425,10 +1427,17 @@ def restore_local_artifacts(
                 continue
             collisions.append(name)
             continue
-        if original is None:
-            target.unlink()
-            continue
-        _atomic_write(root, target, original)
+        try:
+            if original is None:
+                target.unlink()
+            else:
+                _atomic_write(root, target, original)
+        except OSError:
+            # A failure *inside* the rollback is still a restore failure, and
+            # AC2 requires every one of them reported. Letting it escape here
+            # would replace the caller's actionable error with a traceback and
+            # abandon the artifacts after it in the loop (#124).
+            collisions.append(name)
     return collisions
 
 
@@ -1447,12 +1456,23 @@ def _reads_as(root: Path, target: Path, expected: str | None) -> bool:
 
 
 def _atomic_write(root: Path, target: Path, text: str) -> None:
-    """Stage-and-replace one restored artifact, never writing in place (#82)."""
+    """Stage-and-replace one restored artifact, never writing in place (#82).
+
+    The cleanup is the same one `_write_recorded` performs, for the same stated
+    reason: *"a half-written sibling is still a file the vault did not have
+    before"*. It matters more here, not less — this is the restoration path, and
+    AC3 constrains it to exact pre-command bytes **and presence**, so residue
+    from a failed rollback is itself a violation of what the rollback promised.
+    """
     staging = _free_staging_sibling(root, target)
     guard_contained_path(root, staging)
     guard_contained_path(root, target)
-    staging.write_text(text, encoding="utf-8")
-    os.replace(staging, target)
+    try:
+        staging.write_text(text, encoding="utf-8")
+        os.replace(staging, target)
+    except Exception:
+        staging.unlink(missing_ok=True)
+        raise
 
 
 def restore_quarantined(
