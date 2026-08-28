@@ -2068,59 +2068,48 @@ def test_the_manifest_is_assembled_but_not_treated_as_user_content(diverged_vaul
     assert vault.read_manifest(_namespace(vault_root))
 
 
-#: Content that reached publication without the gate having seen it. The guard
-#: exists because ordering alone is what failed in #82 — the gate was correct and
-#: simply ran too early — so the property is asserted rather than arranged.
-def test_a_post_gate_user_content_addition_cannot_be_published():
-    """AC4: an artifact the gate never saw is refused, not published."""
-    gated = {"sessions/a.md": "clean\n"}
-    exempt = {"conflicts/manifest.yaml"}
+def test_published_content_is_exactly_the_gated_set_plus_two_named_exemptions(
+    diverged_vault, monkeypatch
+):
+    """AC1, asserted where it is now enforced: at the gate call, not after it.
 
-    # The assembled-and-gated case is accepted, including the exempt bookkeeping.
-    vault._assert_every_artifact_gated(
-        {**gated, "conflicts/manifest.yaml": "format: x\n"}, gated, exempt
-    )
+    The fix reversed a dependency rather than reordering statements — published
+    content is built *from* the gated mapping, so an ungated artifact is not
+    detected at publication, it cannot be assembled. That leaves nothing to
+    inject from outside, so this pins the property at its source: what the gate
+    was handed, versus what reached the vault.
 
-    # A user-content artifact added after the gate is not.
-    with pytest.raises(vault.VaultError) as excinfo:
-        vault._assert_every_artifact_gated(
-            {**gated, "DECISIONS.md": f"- {SECRET}\n"}, gated, exempt
-        )
-    assert "DECISIONS.md" in str(excinfo.value)
-    assert "never reached the privacy gate" in str(excinfo.value)
-    assert SECRET not in str(excinfo.value)
-
-
-def test_the_gate_guard_is_wired_into_resolve_not_merely_defined(diverged_vault, monkeypatch):
-    """The unit test above proves the guard works; this proves resolve calls it.
-
-    Deliberately a spy rather than an injected bad state: after this fix the
-    content and the gate input are assembled together, so "an artifact added
-    after the gate" is no longer reachable from outside. That is the fix working,
-    not a gap in coverage — what remains testable end to end is that resolve
-    submits its *whole* published set to the guard, which is what would catch a
-    future re-introduction.
+    Only two things may differ, and both are named in #91: the tooling-written
+    manifest, and a decision carried forward byte-identical from the vault.
     """
     root, vault_root = diverged_vault
     _local_decisions(root, f"# Decisions\n\n- 2026-08-28 {SESSION} 1 keep this\n")
-    seen = {}
-    real = vault._assert_every_artifact_gated
+
+    gated = {}
+    real = vault.gate_artifacts
     monkeypatch.setattr(
         vault,
-        "_assert_every_artifact_gated",
-        lambda content, gated, exempt: seen.update(
-            content=set(content), gated=set(gated), exempt=set(exempt)
-        )
-        or real(content, gated, exempt),
+        "gate_artifacts",
+        lambda artifacts, acks=None: gated.update(artifacts) or real(artifacts, acks),
     )
 
     vault.resolve_project(
         root, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
     )
 
-    # Everything published was submitted, and the decision was gated as changed.
-    assert seen["content"], "resolve did not reach the guard at all"
-    assert vault.DECISIONS_FILENAME in seen["gated"]
-    manifest = f"{vault.CONFLICTS_DIRNAME}/{vault.MANIFEST_FILENAME}"
-    assert manifest in seen["content"] and manifest in seen["exempt"]
-    assert seen["content"] - seen["gated"] - seen["exempt"] == set()
+    namespace = _namespace(vault_root)
+    published = {
+        str(path.relative_to(namespace).as_posix())
+        for path in namespace.rglob("*")
+        if path.is_file()
+    }
+    # Vault-owned bookkeeping the operator never wrote.
+    published -= {
+        f"{vault.STATE_DIRNAME}/{vault.STATE_FILENAME}",
+        vault.MARKER_FILENAME,
+        f"{vault.CONFLICTS_DIRNAME}/{vault.MANIFEST_FILENAME}",
+    }
+
+    assert vault.DECISIONS_FILENAME in gated, "a changed decision must reach the gate"
+    ungated = published - set(gated)
+    assert ungated == set(), f"published without ever reaching the privacy gate: {ungated}"

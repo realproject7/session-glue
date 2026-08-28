@@ -1470,30 +1470,6 @@ def read_manifest(namespace: Path) -> list[dict[str, Any]]:
     return list(records) if isinstance(records, list) else []
 
 
-def _assert_every_artifact_gated(
-    content: dict[str, str], gated: dict[str, str], exempt: set[str]
-) -> None:
-    """Refuse to publish user content that the privacy gate never saw.
-
-    AC1 asks that no changed or new user-content artifact bypass its gate. Doing
-    that by ordering alone is what failed in #82 — the gate was correct and ran
-    too early — so this states the property instead: at publication, every key in
-    ``content`` is either gated, or named as deliberately exempt.
-
-    ``exempt`` is the tooling-written manifest, which is bookkeeping rather than
-    user content, plus any artifact carried forward byte-identical from the vault,
-    whose acknowledgement (if it needed one) was given when it was introduced.
-    Raising here rather than asserting: a stray ungated artifact is a privacy
-    failure, and a caller running with ``-O`` must not lose the check.
-    """
-    ungated = sorted(set(content) - set(gated) - exempt)
-    if ungated:
-        raise VaultError(
-            "refusing to publish artifacts that never reached the privacy gate: "
-            + ", ".join(ungated)
-        )
-
-
 def resolve_project(
     repo_root: Path | str,
     vault_root: Path | str,
@@ -1585,36 +1561,37 @@ def resolve_project(
 
     candidates, records = build_conflict_candidates(archive_conflicts, lifecycle_conflicts)
 
-    # Assemble everything first, then gate. #82 found the reverse: the gate ran
-    # over archives and candidates, and `DECISIONS.md` was appended afterwards —
-    # so a matched secret in a merged decision reached the vault with no
-    # acknowledgement at all (#91).
-    manifest_path = f"{CONFLICTS_DIRNAME}/{MANIFEST_FILENAME}"
-    content = dict(active)
-    content.update(candidates)
-    merged_records = merge_manifest_records(read_manifest(namespace), records)
-    if merged_records:
-        content[manifest_path] = render_manifest(merged_records)
+    # #82 found the gate running over archives and candidates while `DECISIONS.md`
+    # was appended to the published content *afterwards*, so a matched secret in a
+    # merged decision reached the vault unacknowledged (#91).
+    #
+    # The order is not merely corrected here — the dependency is reversed. What
+    # gets published is built *from* what was gated, so an ungated artifact is
+    # not something to detect at publication; it is something that cannot be
+    # assembled. Only the two named exemptions are added afterwards.
+    gate_input = {**active, **candidates}
     decisions_vault = _read_text(Path(namespace), Path(namespace) / DECISIONS_FILENAME)
     decisions = merge_decisions(_read_text(root, _local_decisions_path(root)), decisions_vault)
-    if decisions:
-        content[DECISIONS_FILENAME] = decisions
-
-    gate_input = {**active, **candidates}
     # Changed decisions only, matching push: an acknowledgement binds to an
     # immutable digest, so re-gating bytes the vault already holds would demand
     # an acknowledgement for content this operation did not introduce.
-    carried_forward = set()
+    exempt: dict[str, str] = {}
     if decisions:
         if decisions == decisions_vault:
-            carried_forward.add(DECISIONS_FILENAME)
+            exempt[DECISIONS_FILENAME] = decisions
         else:
             gate_input[DECISIONS_FILENAME] = decisions
-    _assert_every_artifact_gated(content, gate_input, carried_forward | {manifest_path})
     gate_artifacts(
         gate_input,
         vault_state.get("acknowledgements", []) + list(acknowledgements or []),
     )
+
+    # Exemption 2: the conflict manifest is tooling-written bookkeeping, which
+    # #91 states is not user content.
+    merged_records = merge_manifest_records(read_manifest(namespace), records)
+    if merged_records:
+        exempt[f"{CONFLICTS_DIRNAME}/{MANIFEST_FILENAME}"] = render_manifest(merged_records)
+    content = {**gate_input, **exempt}
 
     new_state = {
         "head_session_id": head_session,
