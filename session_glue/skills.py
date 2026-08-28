@@ -194,13 +194,17 @@ def apply_install(plan: SkillPlan) -> None:
     """Perform a planned install: copy the bundle's managed files into the target."""
     target = plan.target
     _reject_symlink(target)
+    # Before the removals and the mkdir, not after them — the same order
+    # `apply_uninstall` already uses. A symlinked ancestor redirects `unlink()`
+    # and `mkdir(parents=True)` exactly as readily as a write, and both used to
+    # run first: the old comment here said this ran "before any file is written",
+    # which was true and hid that deletions and directory creation had already
+    # happened outside the scope root (#92).
+    _assert_within(target, plan.root)
     for path in plan.removes:
         _reject_symlink(path)
         path.unlink()
     target.mkdir(parents=True, exist_ok=True)
-    # After creating the target, confirm it resolves inside the scope root — this
-    # catches a symlinked ancestor directory before any file is written.
-    _assert_within(target, plan.root)
     src = assets.skill_dir(plan.agent)
     for dest in plan.writes:
         resource = src
