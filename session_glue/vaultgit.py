@@ -285,19 +285,30 @@ def sync(
     never leaves a dirty clone that the next run's preflight would refuse for a
     reason the operator did not cause.
     """
+    # Before the clone is touched at all: a checkout linked to another project
+    # must not cause even a fetch, let alone a fast-forward (#87).
+    vault.require_project_id(Path(repo_root), project_id)
+
     clone_path = Path(clone)
     branch, upstream = preflight(clone_path)
     fetch_and_fast_forward(clone_path, branch, upstream)
     before = head_commit(clone_path)
 
+    created = vault.Creations()
     try:
-        digest = operation(clone_path)
+        digest = operation(clone_path, created)
         stage_commit_push(clone_path, project_id, branch, upstream, message)
     except Exception as exc:
+        # Two halves, and neither covers the other: the reset restores tracked
+        # bytes and discards our commit, and `created.undo()` removes artifacts
+        # that never reached a commit — which `git reset --hard` leaves in place
+        # precisely because they are untracked.
+        restored = restore(clone_path, before)
+        created.undo()
         # If the rollback itself fails the operator must hear about it here: the
         # only other signal is the *next* run's preflight refusing a clone they
         # did not dirty.
-        if restore(clone_path, before).returncode != 0:
+        if restored.returncode != 0:
             raise GitVaultError(
                 f"{exc}; additionally, the vault clone could not be returned to "
                 f"{before} — reset it yourself before syncing again"
@@ -308,9 +319,10 @@ def sync(
 
 
 def push(repo_root: Path | str, clone: Path | str, project_id: str, **kwargs) -> str:
-    def operation(clone_path: Path) -> str:
+    def operation(clone_path: Path, created: "vault.Creations") -> str:
         return vault.export_project(
-            repo_root, clone_path, project_id, write_local_state=False, **kwargs
+            repo_root, clone_path, project_id, write_local_state=False,
+            created=created, **kwargs
         )
 
     return sync(repo_root, clone, project_id, operation, f"session-glue: sync {project_id}")
@@ -318,9 +330,10 @@ def push(repo_root: Path | str, clone: Path | str, project_id: str, **kwargs) ->
 
 def resolve(repo_root: Path | str, clone: Path | str, project_id: str, head_session: str,
             **kwargs) -> str:
-    def operation(clone_path: Path) -> str:
+    def operation(clone_path: Path, created: "vault.Creations") -> str:
         return vault.resolve_project(
-            repo_root, clone_path, project_id, head_session, write_local_state=False, **kwargs
+            repo_root, clone_path, project_id, head_session, write_local_state=False,
+            created=created, **kwargs
         )
 
     return sync(
@@ -334,6 +347,7 @@ def pull(repo_root: Path | str, clone: Path | str, project_id: str) -> str:
     Read-only with respect to the remote, so it makes no commit and no push, and
     the local baseline is written by the core in the ordinary way.
     """
+    vault.require_project_id(Path(repo_root), project_id)
     clone_path = Path(clone)
     branch, upstream = preflight(clone_path)
     fetch_and_fast_forward(clone_path, branch, upstream)

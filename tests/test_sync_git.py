@@ -468,3 +468,189 @@ def test_resolve_over_git_commits_once_and_retains_the_candidate(checkout, clone
     assert len(_git(clone, "log", "--oneline").stdout.strip().splitlines()) == commits + 1
     records = vault.read_manifest(clone / "projects" / "alpha")
     assert {r["side"] for r in records} == {"local", "vault"}
+
+
+# --------------------------------------------------------------------------- #
+# Issue #87 — a failed operation restores the clone's exact file set
+# --------------------------------------------------------------------------- #
+
+
+def _fault_at(monkeypatch, target_name):
+    """Make publication fail once it has written ``target_name``.
+
+    Faults *within* the publication sequence rather than before it, so the
+    artifacts already created are real and the rollback has something to undo —
+    the inter-artifact `fault_after` hook cannot express this.
+    """
+    real = vault._write_recorded
+
+    def failing(root, target, text, record):
+        real(root, target, text, record)
+        if Path(target).name == target_name:
+            raise vault.VaultError("injected publication fault")
+
+    monkeypatch.setattr(vault, "_write_recorded", failing)
+
+
+def _tracked_and_untracked(clone):
+    """Everything git can see: tracked files plus untracked ones."""
+    tracked = set(_git(clone, "ls-files").stdout.split())
+    untracked = set(
+        _git(clone, "ls-files", "--others", "--exclude-standard").stdout.split()
+    )
+    return tracked, untracked
+
+
+def test_first_sync_publication_fault_leaves_no_new_vault_artifact(
+    monkeypatch, checkout, clone
+):
+    """AC1: the first sync creates everything, so a fault mid-way creates residue.
+
+    `git reset --hard` cannot remove it — the artifacts were never committed, so
+    they are untracked and the reset leaves them exactly where they are.
+    """
+    before_tracked, before_untracked = _tracked_and_untracked(clone)
+    before_head = _git(clone, "rev-parse", "HEAD").stdout.strip()
+
+    _fault_at(monkeypatch, "vault-project.yaml")
+    with pytest.raises(vault.VaultError):
+        vaultgit.push(checkout, clone, "alpha")
+
+    assert _tracked_and_untracked(clone) == (before_tracked, before_untracked)
+    assert _git(clone, "status", "--porcelain").stdout == ""
+    assert _git(clone, "rev-parse", "HEAD").stdout.strip() == before_head
+    assert vault.read_sync_state(checkout) is None
+    # The namespace must not survive even as empty directories: a leftover
+    # projects/alpha/ makes the next push read the vault as populated.
+    assert not (clone / vault.PROJECTS_DIRNAME / "alpha").exists()
+
+
+def test_later_publication_creating_an_artifact_rolls_back_only_that_artifact(
+    monkeypatch, checkout, clone
+):
+    """AC1/AC2: a *later* sync also creates files — a new session is untracked too."""
+    assert vaultgit.push(checkout, clone, "alpha")
+    baseline = vault.sync_state_path(checkout).read_bytes()
+    before_tracked, before_untracked = _tracked_and_untracked(clone)
+    before_head = _git(clone, "rev-parse", "HEAD").stdout.strip()
+
+    _write_history(checkout, session_id="2026-08-29-1000-second")
+    _fault_at(monkeypatch, "vault-state.yaml")
+    with pytest.raises(vault.VaultError):
+        vaultgit.push(checkout, clone, "alpha")
+
+    assert _tracked_and_untracked(clone) == (before_tracked, before_untracked)
+    assert _git(clone, "status", "--porcelain").stdout == ""
+    assert _git(clone, "rev-parse", "HEAD").stdout.strip() == before_head
+    assert vault.sync_state_path(checkout).read_bytes() == baseline
+
+
+def test_rollback_retains_operator_files_inside_and_outside_the_namespace(
+    monkeypatch, checkout, clone
+):
+    """AC2: rollback deletes what it created, and nothing else.
+
+    The naive fix — `git clean -fd`, or `git clean -fd -- projects/<id>` — passes
+    the file-set assertion above and destroys both of these.
+    """
+    outside = clone / "operator-notes.txt"
+    outside.write_text("mine\n", encoding="utf-8")
+    inside_dir = clone / vault.PROJECTS_DIRNAME / "alpha"
+    inside_dir.mkdir(parents=True)
+    inside = inside_dir / "operator-scratch.txt"
+    inside.write_text("also mine\n", encoding="utf-8")
+
+    _fault_at(monkeypatch, "vault-project.yaml")
+    with pytest.raises(vault.VaultError):
+        vaultgit.push(checkout, clone, "alpha")
+
+    assert outside.read_text(encoding="utf-8") == "mine\n"
+    assert inside.read_text(encoding="utf-8") == "also mine\n"
+    # The directory was the operator's, so it survives even though publication
+    # would have written into it.
+    assert inside_dir.is_dir()
+
+
+def test_ahead_remote_publication_fault_keeps_device_b_and_drops_our_artifacts(
+    tmp_path, checkout, clone, bare_remote, monkeypatch
+):
+    """AC1 + the approved rollback target: B's fetched commit must survive."""
+    assert vaultgit.push(checkout, clone, "alpha")
+    baseline = vault.sync_state_path(checkout).read_bytes()
+
+    other = _clone(bare_remote, tmp_path / "other")
+    (other / "from-device-b.txt").write_text("b\n", encoding="utf-8")
+    _git(other, "add", "from-device-b.txt")
+    _git(other, "commit", "--quiet", "-m", "device b")
+    _git(other, "push", "--quiet")
+    remote_tip = _git(other, "rev-parse", "HEAD").stdout.strip()
+
+    _write_history(checkout, session_id="2026-08-29-1100-third")
+    _fault_at(monkeypatch, "vault-state.yaml")
+    with pytest.raises(vault.VaultError):
+        vaultgit.push(checkout, clone, "alpha")
+
+    assert _git(clone, "rev-parse", "HEAD").stdout.strip() == remote_tip
+    assert (clone / "from-device-b.txt").is_file()
+    assert _git(clone, "status", "--porcelain").stdout == ""
+    assert vault.sync_state_path(checkout).read_bytes() == baseline
+
+
+@pytest.mark.parametrize("command", ["push", "pull", "resolve"])
+def test_project_id_mismatch_rejects_before_any_clone_mutation(
+    checkout, clone, bare_remote, command
+):
+    """AC3: the refusal must precede fetch and fast-forward, not follow them."""
+    assert vaultgit.push(checkout, clone, "alpha") == vaultgit.push(
+        checkout, clone, "alpha"
+    )
+    before_head = _git(clone, "rev-parse", "HEAD").stdout.strip()
+
+    # Device B moves the remote ahead: if the mismatch were checked after the
+    # fast-forward, the clone would advance to this commit before refusing.
+    other = _clone(bare_remote, clone.parent / "other-mismatch")
+    (other / "ahead.txt").write_text("b\n", encoding="utf-8")
+    _git(other, "add", "ahead.txt")
+    _git(other, "commit", "--quiet", "-m", "ahead")
+    _git(other, "push", "--quiet")
+
+    with pytest.raises(vault.VaultError) as excinfo:
+        if command == "push":
+            vaultgit.push(checkout, clone, "beta")
+        elif command == "pull":
+            vaultgit.pull(checkout, clone, "beta")
+        else:
+            vaultgit.resolve(checkout, clone, "beta", "2026-08-28-1200-alpha")
+    assert "one project ID per checkout" in str(excinfo.value)
+
+    # The clone never moved: no fetch-driven fast-forward happened.
+    assert _git(clone, "rev-parse", "HEAD").stdout.strip() == before_head
+
+
+def test_stage_or_commit_failure_removes_artifacts_that_never_reached_a_commit(
+    monkeypatch, checkout, clone
+):
+    """The one rollback branch `git reset --hard` cannot cover.
+
+    Publication succeeds, so the artifacts are on disk; `git add`/`git commit`
+    then fails, so they were never committed and are therefore untracked. A
+    reset restores tracked bytes and leaves them exactly where they are — the
+    recorded created-set is the only thing that removes them. That is #87's
+    "a failed Git operation restores the clone to its exact pre-operation file
+    set", and it is a different branch from a fault *inside* publication.
+    """
+    before_tracked, before_untracked = _tracked_and_untracked(clone)
+    before_head = _git(clone, "rev-parse", "HEAD").stdout.strip()
+
+    def refuse(*args, **kwargs):
+        raise vaultgit.GitVaultError("not a Git working tree: cannot stage")
+
+    monkeypatch.setattr(vaultgit, "stage_commit_push", refuse)
+    with pytest.raises(vaultgit.GitVaultError):
+        vaultgit.push(checkout, clone, "alpha")
+
+    assert _tracked_and_untracked(clone) == (before_tracked, before_untracked)
+    assert _git(clone, "status", "--porcelain").stdout == ""
+    assert _git(clone, "rev-parse", "HEAD").stdout.strip() == before_head
+    assert not (clone / vault.PROJECTS_DIRNAME / "alpha").exists()
+    assert vault.read_sync_state(checkout) is None

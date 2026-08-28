@@ -574,13 +574,69 @@ def guard_write_path(containment_root: Path, target: Path) -> None:
         writer.reject_symlink(current)
 
 
-def _prepare_target(containment_root: Path, target: Path) -> None:
-    """Guard the whole ancestry, create parents, then re-assert containment."""
+def _prepare_target(
+    containment_root: Path, target: Path, created_dirs: list[Path] | None = None
+) -> None:
+    """Guard the whole ancestry, create parents, then re-assert containment.
+
+    ``created_dirs`` collects the directories this call brings into existence,
+    deepest last, so a rollback can prune exactly those and leave any directory
+    that was already there alone (#87).
+    """
     from . import writer
 
     guard_write_path(containment_root, target)
+    if created_dirs is not None:
+        # Bounded at the containment root explicitly. Nothing above it can be
+        # missing today — a folder vault must already exist and a clone must be
+        # a real worktree — but in a rollback whose whole contract is "remove
+        # only what you created", the bound belongs in the code rather than in a
+        # precondition somewhere else.
+        root = Path(containment_root)
+        missing = [
+            p
+            for p in [target.parent, *target.parent.parents]
+            if not p.exists() and p != root and root in p.parents
+        ]
+        created_dirs.extend(reversed(missing))
     target.parent.mkdir(parents=True, exist_ok=True)
     writer.assert_within(target.parent, Path(containment_root).resolve())
+
+
+class Creations:
+    """Every path one publication brought into existence, and how to undo it.
+
+    Public because the Git transport owns the failure window this exists for:
+    a publication can succeed and the push that makes it real can still fail,
+    and only the transport knows that.
+
+    #87's contract is asymmetric on purpose: a rollback removes what the
+    operation *created* and never touches anything that was already there, so an
+    operator file sitting inside the transport namespace survives a failed sync.
+    Restoring the bytes of a *replaced* file is a different guarantee and belongs
+    to #93.
+    """
+
+    def __init__(self) -> None:
+        self.files: list[Path] = []
+        self.dirs: list[Path] = []
+
+    def undo(self) -> None:
+        """Delete created files, then prune the directories they needed.
+
+        Directories matter beyond tidiness: an empty ``projects/<id>/sessions/``
+        left behind makes :func:`_namespace_is_empty` report a populated
+        namespace, so a failed first sync would be read as an unavailable vault
+        on every later attempt.
+        """
+        for target in reversed(self.files):
+            Path(target).unlink(missing_ok=True)
+        for directory in reversed(self.dirs):
+            try:
+                Path(directory).rmdir()
+            except OSError:
+                # Not empty: something pre-existing lives here, so it stays.
+                pass
 
 
 class LocalWrite:
@@ -974,6 +1030,7 @@ def _publish(
     state: dict[str, Any],
     project_id: str,
     fault_after: int | None = None,
+    created: "Creations | None" = None,
 ) -> None:
     """Write content, then state, then the marker — in that order.
 
@@ -985,6 +1042,13 @@ def _publish(
     level between the vault root and the file is refused before the first write,
     so a symlinked namespace or nested parent cannot redirect a write out of the
     vault root.
+
+    ``created`` records every path this call brings into existence but never
+    undoes anything itself: the caller decides. #87 gives that decision to the
+    Git transport, which needs it because a ``git reset --hard`` restores tracked
+    bytes and cannot remove a file that was never committed. Folder-mode recovery
+    on a failed publication is #93's, so a folder caller that passes no record
+    keeps today's behaviour exactly.
     """
     root = Path(vault_root)
     path = Path(namespace)
@@ -994,20 +1058,24 @@ def _publish(
     for target in targets:
         guard_write_path(root, target)
 
+    record = Creations() if created is None else created
     written = 0
     for relative_path in sorted(content):
         if fault_after is not None and written == fault_after:
             raise VaultError("injected publication fault")
         target = path / relative_path
-        _prepare_target(root, target)
-        target.write_text(content[relative_path], encoding="utf-8", newline="\n")
+        _write_recorded(root, target, content[relative_path], record)
         written += 1
-    state_target = state_path(path)
-    _prepare_target(root, state_target)
-    state_target.write_text(render_vault_state(state), encoding="utf-8", newline="\n")
-    marker_target = path / MARKER_FILENAME
-    _prepare_target(root, marker_target)
-    marker_target.write_text(render_marker(project_id), encoding="utf-8", newline="\n")
+    _write_recorded(root, state_path(path), render_vault_state(state), record)
+    _write_recorded(root, path / MARKER_FILENAME, render_marker(project_id), record)
+
+
+def _write_recorded(root: Path, target: Path, text: str, record: "Creations") -> None:
+    """Write one publication target, noting it if it did not exist before."""
+    _prepare_target(root, target, record.dirs)
+    if not target.exists():
+        record.files.append(target)
+    target.write_text(text, encoding="utf-8", newline="\n")
 
 
 def export_project(
@@ -1017,6 +1085,7 @@ def export_project(
     acknowledgements: list[dict[str, Any]] | None = None,
     fault_after: int | None = None,
     write_local_state: bool = True,
+    created: "Creations | None" = None,
 ) -> str:
     """Export the local history into the vault; return the resulting state digest.
 
@@ -1103,7 +1172,7 @@ def export_project(
         ),
     }
     _publish(Path(vault_root), namespace, content, new_state, project_id,
-             fault_after=fault_after)
+             fault_after=fault_after, created=created)
 
     digest = state_digest(new_state)
     if write_local_state:
@@ -1265,6 +1334,7 @@ def resolve_project(
     lifecycle_choices: dict[str, str] | None = None,
     acknowledgements: list[dict[str, Any]] | None = None,
     write_local_state: bool = True,
+    created: "Creations | None" = None,
 ) -> str:
     """Resolve every named conflict with explicit selectors and publish the result.
 
@@ -1361,7 +1431,7 @@ def resolve_project(
             vault_state.get("acknowledgements", []), list(acknowledgements or [])
         ),
     }
-    _publish(Path(vault_root), namespace, content, new_state, project_id)
+    _publish(Path(vault_root), namespace, content, new_state, project_id, created=created)
     digest = state_digest(new_state)
     if write_local_state:
         write_sync_state(root, project_id, digest)
