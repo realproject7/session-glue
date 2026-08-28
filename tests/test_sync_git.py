@@ -12,9 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from session_glue import cli, schema, vault, vaultgit
+from session_glue import cli, schema, vault, vaultgit, writer
+from session_glue.vault import SESSIONS_DIRNAME
 
-from test_vault import _write_history
+from test_vault import BODY, _frontmatter, _write_history
 
 pytestmark = pytest.mark.skipif(
     subprocess.run(["git", "--version"], capture_output=True, check=False).returncode != 0,
@@ -1106,3 +1107,311 @@ def test_a_second_push_still_publishes_replaced_artifacts(checkout, clone, bare_
         "a replaced artifact was not staged — `Creations.files` alone would do this"
     )
     assert expected_new in _pushed_paths(bare_remote)
+
+
+# --------------------------------------------------------------------------- #
+# Issue #110 — vault-side archives are admitted by Git provenance, not by shape
+# --------------------------------------------------------------------------- #
+
+
+def _untracked_namespace_file(clone: Path, name: str, text: str) -> str:
+    target = clone / "projects" / "alpha" / "sessions" / name
+    target.write_text(text, encoding="utf-8")
+    return f"projects/alpha/sessions/{name}"
+
+
+def _copy_of_a_published_archive(clone: Path, *, session_id: str | None = None) -> str:
+    """A genuine published archive, secret appended, optionally re-identified.
+
+    Copied rather than invented so it parses exactly like the real thing. This
+    is the fixture a shape-based rule cannot reject: with ``session_id`` set to
+    match the new filename, both "frontmatter parses" and
+    "path == sessions/<session_id>.md" hold, and the file is still something no
+    publication ever wrote.
+    """
+    real = next((clone / "projects" / "alpha" / "sessions").glob("*.md"))
+    text = real.read_text(encoding="utf-8")
+    if session_id is not None:
+        text = text.replace(vault._session_id_of(text), session_id)
+    return text + f"\nleaked {SECRET_SHAPED}\n"
+
+
+def _make_arbitrary(clone):
+    return _untracked_namespace_file(clone, "private.md", f"token {SECRET_SHAPED}\n")
+
+
+def _make_real_copy(clone):
+    return _untracked_namespace_file(clone, "private.md", _copy_of_a_published_archive(clone))
+
+
+def _make_self_consistent_forgery(clone):
+    forged = _copy_of_a_published_archive(clone, session_id="2026-09-01-1200-evil")
+    return _untracked_namespace_file(clone, "2026-09-01-1200-evil.md", forged)
+
+
+@pytest.mark.parametrize(
+    "make_unknown",
+    [_make_arbitrary, _make_real_copy, _make_self_consistent_forgery],
+    ids=["arbitrary-bytes", "copy-of-a-real-archive", "self-consistent-forgery"],
+)
+def test_an_untracked_archive_shaped_file_is_not_published(
+    checkout, clone, bare_remote, make_unknown
+):
+    """AC1: `sessions/*.md` shape and self-consistency confer no trust.
+
+    Asserted **positively** on what reached the remote. Every way this can break
+    — an admission set built with `str(Path)` on Windows, a filter applied after
+    the divergence check, a transport that forgets to pass the set — publishes
+    nothing at all, and an absence-only assertion passes on all of them. The
+    expected-artifact assertion is the one that fails.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    unknown_rel = make_unknown(clone)
+    before = (clone / unknown_rel).read_text(encoding="utf-8")
+    expected = _second_session(checkout)
+
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    pushed = _pushed_paths(bare_remote)
+    assert expected in pushed, "the generated artifact was not published"
+    assert unknown_rel not in pushed
+    # Skipped, never refused, and never rewritten: it stays exactly as left.
+    assert (clone / unknown_rel).read_text(encoding="utf-8") == before
+    assert unknown_rel in _git(clone, "status", "--porcelain").stdout
+
+
+def test_a_no_op_sync_with_an_untracked_archive_shaped_file_creates_no_commit(
+    checkout, clone
+):
+    """AC2: the file must not manufacture work for a sync that has none."""
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    commits = len(_git(clone, "log", "--oneline").stdout.strip().splitlines())
+    _make_self_consistent_forgery(clone)
+
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    assert len(_git(clone, "log", "--oneline").stdout.strip().splitlines()) == commits
+
+
+def test_acknowledgement_does_not_publish_an_untracked_archive_shaped_file(
+    checkout, clone, bare_remote
+):
+    """AC4: acknowledgement is not an escape hatch.
+
+    An unadmitted path never reaches the gate, so there is no triple that
+    describes it; passing one must not change the outcome.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    unknown_rel = _make_self_consistent_forgery(clone)
+    expected = _second_session(checkout)
+
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+        "--acknowledge",
+        f"sessions/2026-09-01-1200-evil.md:{'0' * 64}:GitHub token (ghp_/gho_)",
+    ) == 0
+
+    pushed = _pushed_paths(bare_remote)
+    assert expected in pushed
+    assert unknown_rel not in pushed
+
+
+def test_resolve_does_not_admit_an_untracked_archive_shaped_file(
+    checkout, clone, bare_remote
+):
+    """AC6: the other publishing path applies the same admission.
+
+    Resolve gates everything it publishes, so an unknown file here was never an
+    ungated push — but it must not be able to demand an acknowledgement, nor to
+    ride along on the resolution.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    archive = next((clone / "projects" / "alpha" / "sessions").glob("*.md"))
+    archive.write_text(
+        archive.read_text(encoding="utf-8").replace("Did the thing.", "Diverged."),
+        encoding="utf-8",
+    )
+    _git(clone, "add", "--", "projects/alpha")
+    _git(clone, "commit", "--quiet", "-m", "diverge in the vault")
+    _git(clone, "push", "--quiet")
+    unknown_rel = _make_self_consistent_forgery(clone)
+
+    session_id = "2026-08-28-1200-alpha"
+    assert _run(
+        "sync", "resolve", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone), "--head-session", session_id,
+        "--archive", f"{session_id}=local",
+    ) == 0
+
+    pushed = _pushed_paths(bare_remote)
+    assert f"projects/alpha/sessions/{session_id}.md" in pushed, "the resolution was not published"
+    assert unknown_rel not in pushed
+    assert unknown_rel in _git(clone, "status", "--porcelain").stdout
+
+
+def test_a_tracked_vault_archive_is_still_compared_for_divergence(checkout, clone):
+    """AC8: admission must not drop legitimate artifacts.
+
+    The observable consequence of over-filtering is not a missing file — nothing
+    deletes one — it is a guard that stops firing. #89's same-session divergence
+    check reads the vault-side archive at the same path, so if tracked archives
+    stopped being admitted this would publish silently instead of refusing.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    local = next((checkout / ".agent-history" / "sessions").glob("*.md"))
+    local.write_text(
+        local.read_text(encoding="utf-8").replace("Did the thing.", "Edited locally."),
+        encoding="utf-8",
+    )
+
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == cli.EXIT_CONFLICT
+
+
+def test_tracked_artifacts_lists_committed_namespace_paths_only(checkout, clone):
+    """AC5 + AC1: the admission set itself — custom names in, untracked out."""
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    _make_self_consistent_forgery(clone)
+
+    admitted = vaultgit.tracked_artifacts(clone, "alpha")
+
+    assert "sessions/2026-08-28-1200-alpha.md" in admitted
+    assert "sessions/2026-09-01-1200-evil.md" not in admitted
+    # Namespace-relative, forward slashes, and no path outside the namespace.
+    assert "README.md" not in admitted
+    assert not [path for path in admitted if path.startswith("projects/")]
+
+
+def test_a_custom_archive_name_is_admitted_because_it_is_tracked(tmp_path, clone):
+    """AC5: admission never consults the filename, so no carve-out is needed."""
+    root = tmp_path / "custom"
+    root.mkdir()
+    frontmatter = _frontmatter(str(root), None)
+    handoff = schema.Handoff.from_frontmatter(frontmatter, BODY)
+    writer.create_handoff(
+        repo_root=root, frontmatter=frontmatter, body=BODY, handoff=handoff,
+        archive_name="named-by-hand",
+    )
+
+    assert _run(
+        "sync", "push", "--repo-root", str(root), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    admitted = vaultgit.tracked_artifacts(clone, "alpha")
+    assert "sessions/named-by-hand.md" in admitted
+    assert vault.admitted_archives(
+        {"sessions/named-by-hand.md": "x"}, admitted
+    ) == {"sessions/named-by-hand.md": "x"}
+
+
+def test_a_custom_archive_name_is_still_admitted_on_a_subsequent_sync(
+    tmp_path, clone, bare_remote
+):
+    """AC5 end to end: a later export still admits a custom-named archive.
+
+    Presence in the remote cannot show this by itself. The archive was committed
+    by the first push and nothing deletes it, so it stays in the remote whether
+    or not a later publication admits it — the same reason over-filtering has no
+    symptom on disk. What discriminates is #89's same-session divergence check:
+    it fires only for a path present in the *admitted* vault-side set, so an
+    edit to the custom-named archive must still be refused. Under a
+    filename-based rule it would be dropped from that set and the edit would
+    publish silently.
+    """
+    root = tmp_path / "custom"
+    root.mkdir()
+    frontmatter = _frontmatter(str(root), None)
+    handoff = schema.Handoff.from_frontmatter(frontmatter, BODY)
+    writer.create_handoff(
+        repo_root=root, frontmatter=frontmatter, body=BODY, handoff=handoff,
+        archive_name="named-by-hand",
+    )
+    assert _run(
+        "sync", "push", "--repo-root", str(root), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    # A second sync with real work: the custom-named archive must survive it.
+    _write_history(root, session_id="2026-08-29-0900-second")
+    assert _run(
+        "sync", "push", "--repo-root", str(root), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    pushed = _pushed_paths(bare_remote)
+    assert "projects/alpha/sessions/named-by-hand.md" in pushed
+    assert "projects/alpha/sessions/2026-08-29-0900-second.md" in pushed
+
+    # The discriminating half: still admitted, so still compared.
+    custom = root / ".agent-history" / SESSIONS_DIRNAME / "named-by-hand.md"
+    custom.write_text(
+        custom.read_text(encoding="utf-8").replace("Did the thing.", "Edited locally."),
+        encoding="utf-8",
+    )
+    assert _run(
+        "sync", "push", "--repo-root", str(root), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == cli.EXIT_CONFLICT
+
+
+def test_the_admission_set_and_the_archive_listing_use_the_same_keys(
+    checkout, clone
+):
+    """The two key spaces that must agree, pinned in one place.
+
+    `tracked_artifacts` derives namespace-relative POSIX paths by prefix
+    arithmetic over `git ls-files`; `read_vault_archives` builds them as
+    `sessions/<name>`. Nothing else asserts that these agree, and a divergence
+    would over-filter — the failure mode with no symptom, since nothing deletes
+    a file and the guards simply stop firing. On a clean clone the sessions half
+    of the admission set must be exactly the listing.
+
+    Published twice on purpose: after the first push every artifact is
+    `replaced` rather than `created`, which is where #104's equivalent set went
+    wrong.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    _second_session(checkout)
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    listed = set(vault.read_vault_archives(clone / "projects" / "alpha"))
+    admitted = vaultgit.tracked_artifacts(clone, "alpha")
+
+    assert len(listed) == 2, "the fixture must publish something to compare"
+    assert {
+        path for path in admitted if path.startswith(f"{SESSIONS_DIRNAME}/")
+    } == listed
