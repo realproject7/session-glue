@@ -53,6 +53,8 @@ DECISIONS_FILENAME = "DECISIONS.md"
 STATE_DIRNAME = "state"
 STATE_FILENAME = "vault-state.yaml"
 CONFLICTS_DIRNAME = "conflicts"
+#: Where `glue sync recover-duplicates --apply` parks conflicting copies (#116).
+QUARANTINE_DIRNAME = "quarantine"
 CONFLICT_ARCHIVES_DIRNAME = "archives"
 CONFLICT_LIFECYCLE_DIRNAME = "lifecycle"
 MANIFEST_FILENAME = "manifest.yaml"
@@ -999,10 +1001,10 @@ def reject_duplicate_session_ids(archives: dict[str, str], origin: str) -> None:
     an ordinary push publishes to every device that later pulls.
 
     The message names the id and both paths because this refusal blocks pull,
-    push *and* resolve — "duplicate session id" alone is not a recovery path.
-    It deliberately does **not** name a recovery command: #116 owns that tool and
-    has not shipped, and an error that tells an operator to run something that
-    does not exist is worse than one that tells them what to do by hand.
+    push *and* resolve — "duplicate session id" alone is not a recovery path. It
+    points at ``glue sync recover-duplicates``, which #116 shipped; before that
+    existed it gave the manual remedy instead, because an error naming a command
+    that does not exist is worse than one naming none.
     """
     by_session: dict[str, list[str]] = {}
     for relative_path in sorted(archives):
@@ -1021,8 +1023,8 @@ def reject_duplicate_session_ids(archives: dict[str, str], origin: str) -> None:
             f"{session_id}: " + ", ".join(paths)
             for session_id, paths in sorted(duplicates.items())
         )
-        + "\nKeep one archive per session id: rename the session in one of them, "
-        "or move the extra copy out of the sessions directory."
+        + "\nRun 'glue sync recover-duplicates' to see them, then "
+        "'--apply' to quarantine the extra copies without deleting them."
     )
 
 # --------------------------------------------------------------------------- #
@@ -1275,6 +1277,83 @@ def _free_staging_sibling(root: Path, target: Path) -> Path:
         if not candidate.exists():
             return candidate
         attempt += 1
+
+
+def free_quarantine_dir(repo_root: Path | str, stamp: str) -> Path:
+    """A quarantine directory under ``.agent-history/`` that does not yet exist.
+
+    Deliberately the same shape as :func:`_free_staging_sibling`: never reuse an
+    occupied name. Two ``--apply`` runs inside the same second, or a retry after
+    a partial failure, otherwise land on the same timestamp and the second run
+    would write into — or over — the first run's quarantine. That would destroy
+    the copies this command exists to preserve, which is exactly the #93 hazard
+    in a new place.
+    """
+    from . import writer
+
+    root = Path(repo_root)
+    history_dir = root / writer.AGENT_HISTORY_DIRNAME
+    attempt = 0
+    while True:
+        suffix = "" if attempt == 0 else f"-{attempt}"
+        candidate = history_dir / f"{QUARANTINE_DIRNAME}-{stamp}{suffix}"
+        guard_contained_path(root, candidate)
+        if not candidate.exists():
+            return candidate
+        attempt += 1
+
+
+def plan_duplicate_recovery(repo_root: Path | str) -> dict[str, list[str]]:
+    """Every duplicated local ``session_id`` and all the paths claiming it.
+
+    Read-only. This is what the dry-run prints, and what ``--apply`` acts on, so
+    the two can never disagree about what is about to move.
+    """
+    archives = read_local_archives(repo_root)
+    by_session: dict[str, list[str]] = {}
+    for relative_path in sorted(archives):
+        session_id = _session_id_of(archives[relative_path])
+        if session_id:
+            by_session.setdefault(session_id, []).append(relative_path)
+    return {
+        session_id: paths for session_id, paths in by_session.items() if len(paths) > 1
+    }
+
+
+def quarantine_duplicates(
+    repo_root: Path | str, duplicates: dict[str, list[str]], stamp: str
+) -> tuple[Path, list[str]]:
+    """Move every archive claiming a duplicated id into a fresh quarantine.
+
+    Moved, never deleted: the operator may not know which copy is theirs, and
+    this tool is not entitled to decide that for them. The authoritative set is
+    re-materialized from the vault afterwards, so a copy that is genuinely the
+    published one comes back; a copy that is residue stays in the quarantine
+    where they can read it.
+
+    Unique-id local-only archives are never touched — they are not in
+    ``duplicates`` by construction.
+    """
+    from . import writer
+
+    root = Path(repo_root)
+    sessions_dir = root / writer.AGENT_HISTORY_DIRNAME / SESSIONS_DIRNAME
+    quarantine = free_quarantine_dir(root, stamp)
+    # Guarded again here, not only inside the helper: `unguarded_fs_targets`
+    # matches guards to targets *within one body*, and that is the point — a
+    # guard one call away is how ordering defects hide (#88).
+    guard_contained_path(root, quarantine)
+    quarantine.mkdir(parents=True)
+    moved: list[str] = []
+    for relative_path in sorted(path for paths in duplicates.values() for path in paths):
+        source = sessions_dir / Path(relative_path).name
+        guard_contained_path(root, source)
+        target = quarantine / Path(relative_path).name
+        guard_contained_path(root, target)
+        os.replace(source, target)
+        moved.append(relative_path)
+    return quarantine, moved
+
 
 
 def _write_recorded(root: Path, target: Path, text: str, record: "Creations") -> None:

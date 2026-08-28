@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import (
@@ -539,6 +539,30 @@ def _add_sync_commands(subparsers: argparse._SubParsersAction) -> None:
     )
     resolve.set_defaults(func=_cmd_sync_resolve)
 
+    recover = sync_sub.add_parser(
+        "recover-duplicates",
+        help="List, and optionally quarantine, duplicate-session-id local archives.",
+        description=(
+            "Two local archives claiming one session_id make every vault "
+            "operation refuse, because the derived head would otherwise depend "
+            "on filename order. This lists them; --apply moves the conflicting "
+            "copies into a timestamped quarantine under .agent-history/ without "
+            "deleting anything, then re-materializes the authoritative vault-side "
+            "set. Archives with a unique session_id are never touched."
+        ),
+    )
+    _add_common_sync_args(recover)
+    _add_vault_transport(recover)
+    recover.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Perform the quarantine and re-materialization. Without it this "
+            "command only reports, and changes nothing."
+        ),
+    )
+    recover.set_defaults(func=_cmd_sync_recover_duplicates)
+
     migrate = sync_sub.add_parser(
         "migrate-roots",
         help="Local-only: bring one archive's project_root inside the repo root.",
@@ -710,6 +734,45 @@ def _cmd_sync_resolve(args: argparse.Namespace) -> int:
             args.head_session,
             **choices,
         )
+
+    return _run_sync(operation)
+
+
+def _cmd_sync_recover_duplicates(args: argparse.Namespace) -> int:
+    """Implement ``glue sync recover-duplicates``.
+
+    Dry-run by default: an operator reaching this command is already blocked by
+    #115's refusal, and the first thing they need is to see what the tool is
+    about to move — not to have it moved.
+    """
+    root = Path(args.repo_root)
+    try:
+        duplicates = vault.plan_duplicate_recovery(root)
+    except (vault.VaultError, writer.HandoffWriteError) as exc:
+        print(f"glue sync recover-duplicates: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if not duplicates:
+        print("no duplicate session ids in local history; nothing to recover")
+        return 0
+
+    for session_id, paths in sorted(duplicates.items()):
+        print(f"{session_id}: " + ", ".join(paths))
+    if not args.apply:
+        print(
+            f"{len(duplicates)} duplicated session id(s); "
+            "re-run with --apply to quarantine the conflicting copies"
+        )
+        return 0
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+    def operation() -> str:
+        quarantine, moved = vault.quarantine_duplicates(root, duplicates, stamp)
+        print(f"quarantined {len(moved)} archive(s) under {quarantine}")
+        if _uses_git_transport(args):
+            return vaultgit.pull(root, _resolved_vault_git_dir(args), args.project_id)
+        return vault.import_project(root, _resolved_vault_dir(args), args.project_id)
 
     return _run_sync(operation)
 
