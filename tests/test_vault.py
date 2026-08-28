@@ -1939,3 +1939,188 @@ def test_re_running_the_same_selector_completes_after_a_local_write_failure(
     # Retention stayed idempotent across the two publications.
     records = vault.read_manifest(vault_root / vault.PROJECTS_DIRNAME / "alpha")
     assert len(records) == len({(r["session_id"], r["kind"], r["side"], r["sha256"]) for r in records})
+
+
+# --------------------------------------------------------------------------- #
+# Issue #91 — resolve gates DECISIONS.md before it publishes
+# --------------------------------------------------------------------------- #
+
+
+SECRET = "ghp_" + "d" * 20
+
+
+@pytest.fixture()
+def diverged_vault(tmp_path, checkout):
+    """A vault whose shared session diverged, so `resolve` has something to do."""
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    vault.export_project(checkout, vault_root, "alpha")
+    _diverge(vault_root)
+    return checkout, vault_root
+
+
+def _local_decisions(root, text):
+    (root / ".agent-history" / vault.DECISIONS_FILENAME).write_text(text, encoding="utf-8")
+
+
+def _namespace(vault_root):
+    return vault_root / vault.PROJECTS_DIRNAME / "alpha"
+
+
+def test_resolve_blocks_when_only_decisions_carries_a_finding(diverged_vault):
+    """AC2: the #82 hole — the archive conflict is clean, the decision is not.
+
+    The archives here are deliberately free of any match, so the *only* thing
+    that can block is `DECISIONS.md`. Before this fix the gate had already run by
+    the time decisions were added to `content`, and the secret was published.
+    """
+    root, vault_root = diverged_vault
+    _local_decisions(root, f"# Decisions\n\n- 2026-08-28 {SESSION} 1 use token {SECRET}\n")
+    state_before = vault.state_path(_namespace(vault_root)).read_bytes()
+
+    with pytest.raises(vault.PrivacyBlocked) as excinfo:
+        vault.resolve_project(
+            root, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
+        )
+
+    # AC4/AC5: nothing published, and the match text never echoed.
+    assert vault.state_path(_namespace(vault_root)).read_bytes() == state_before
+    assert not (_namespace(vault_root) / vault.DECISIONS_FILENAME).exists()
+    assert SECRET not in str(excinfo.value)
+    assert vault.DECISIONS_FILENAME in str(excinfo.value)
+
+
+def test_acknowledging_the_decision_triple_lets_the_resolve_through(diverged_vault):
+    """AC3: the block is releasable by the exact triple, not merely a refusal."""
+    root, vault_root = diverged_vault
+    decisions = f"# Decisions\n\n- 2026-08-28 {SESSION} 1 use token {SECRET}\n"
+    _local_decisions(root, decisions)
+
+    with pytest.raises(vault.PrivacyBlocked) as excinfo:
+        vault.resolve_project(
+            root, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
+        )
+    finding = excinfo.value.findings[0]
+
+    vault.resolve_project(
+        root, vault_root, "alpha", SESSION,
+        archive_choices={SESSION: "local"},
+        acknowledgements=[
+            {"path": finding.path, "sha256": finding.sha256, "label": finding.label}
+        ],
+    )
+
+    published = (_namespace(vault_root) / vault.DECISIONS_FILENAME).read_text(encoding="utf-8")
+    assert SECRET in published
+
+
+def test_unchanged_vault_decisions_are_not_re_gated(tmp_path, checkout):
+    """AC3: an acknowledgement binds to a digest, so carrying bytes forward is free.
+
+    The vault already holds this decision under an acknowledgement. A later
+    resolve that does not change it must not demand the acknowledgement again —
+    re-gating would make every subsequent resolve fail for content this
+    operation did not introduce.
+    """
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    _local_decisions(checkout, f"# Decisions\n\n- 2026-08-28 {SESSION} 1 use token {SECRET}\n")
+
+    # Acknowledge from the challenge the tool actually issues: the gated artifact
+    # is the *merged* text, whose digest is not the raw file's.
+    with pytest.raises(vault.PrivacyBlocked) as excinfo:
+        vault.export_project(checkout, vault_root, "alpha")
+    finding = excinfo.value.findings[0]
+    vault.export_project(
+        checkout, vault_root, "alpha",
+        acknowledgements=[
+            {"path": finding.path, "sha256": finding.sha256, "label": finding.label}
+        ],
+    )
+    published = _namespace(vault_root) / vault.DECISIONS_FILENAME
+    assert published.is_file()
+
+    # Make the local copy byte-identical to the vault's, so the merge introduces
+    # nothing and the artifact is genuinely carried forward.
+    _local_decisions(checkout, published.read_text(encoding="utf-8"))
+    _diverge(vault_root)
+
+    # No acknowledgement passed this time.
+    vault.resolve_project(
+        checkout, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
+    )
+
+    assert SECRET in (_namespace(vault_root) / vault.DECISIONS_FILENAME).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_the_manifest_is_assembled_but_not_treated_as_user_content(diverged_vault):
+    """AC1: bookkeeping is exempt by name, not by being appended after the gate."""
+    root, vault_root = diverged_vault
+
+    vault.resolve_project(
+        root, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
+    )
+
+    manifest = _namespace(vault_root) / vault.CONFLICTS_DIRNAME / vault.MANIFEST_FILENAME
+    assert manifest.is_file()
+    assert vault.read_manifest(_namespace(vault_root))
+
+
+#: Content that reached publication without the gate having seen it. The guard
+#: exists because ordering alone is what failed in #82 — the gate was correct and
+#: simply ran too early — so the property is asserted rather than arranged.
+def test_a_post_gate_user_content_addition_cannot_be_published():
+    """AC4: an artifact the gate never saw is refused, not published."""
+    gated = {"sessions/a.md": "clean\n"}
+    exempt = {"conflicts/manifest.yaml"}
+
+    # The assembled-and-gated case is accepted, including the exempt bookkeeping.
+    vault._assert_every_artifact_gated(
+        {**gated, "conflicts/manifest.yaml": "format: x\n"}, gated, exempt
+    )
+
+    # A user-content artifact added after the gate is not.
+    with pytest.raises(vault.VaultError) as excinfo:
+        vault._assert_every_artifact_gated(
+            {**gated, "DECISIONS.md": f"- {SECRET}\n"}, gated, exempt
+        )
+    assert "DECISIONS.md" in str(excinfo.value)
+    assert "never reached the privacy gate" in str(excinfo.value)
+    assert SECRET not in str(excinfo.value)
+
+
+def test_the_gate_guard_is_wired_into_resolve_not_merely_defined(diverged_vault, monkeypatch):
+    """The unit test above proves the guard works; this proves resolve calls it.
+
+    Deliberately a spy rather than an injected bad state: after this fix the
+    content and the gate input are assembled together, so "an artifact added
+    after the gate" is no longer reachable from outside. That is the fix working,
+    not a gap in coverage — what remains testable end to end is that resolve
+    submits its *whole* published set to the guard, which is what would catch a
+    future re-introduction.
+    """
+    root, vault_root = diverged_vault
+    _local_decisions(root, f"# Decisions\n\n- 2026-08-28 {SESSION} 1 keep this\n")
+    seen = {}
+    real = vault._assert_every_artifact_gated
+    monkeypatch.setattr(
+        vault,
+        "_assert_every_artifact_gated",
+        lambda content, gated, exempt: seen.update(
+            content=set(content), gated=set(gated), exempt=set(exempt)
+        )
+        or real(content, gated, exempt),
+    )
+
+    vault.resolve_project(
+        root, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
+    )
+
+    # Everything published was submitted, and the decision was gated as changed.
+    assert seen["content"], "resolve did not reach the guard at all"
+    assert vault.DECISIONS_FILENAME in seen["gated"]
+    manifest = f"{vault.CONFLICTS_DIRNAME}/{vault.MANIFEST_FILENAME}"
+    assert manifest in seen["content"] and manifest in seen["exempt"]
+    assert seen["content"] - seen["gated"] - seen["exempt"] == set()
