@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -726,6 +727,10 @@ class LocalWrite:
     def stage(self, relative_path: str, text: str) -> None:
         self._staged[relative_path] = text
 
+    def staged(self) -> dict[str, str]:
+        """A copy of what has been staged: the transaction ledger's contents (#124)."""
+        return dict(self._staged)
+
     def _ordered(self) -> list[str]:
         archives = sorted(p for p in self._staged if p.startswith(f"{SESSIONS_DIRNAME}/"))
         tail = [p for p in _REPLACE_TAIL if p in self._staged]
@@ -1328,24 +1333,208 @@ def free_quarantine_dir(repo_root: Path | str, stamp: str) -> Path:
         attempt += 1
 
 
+@dataclass
+class RestoreOutcome:
+    """What a rollback could not put back, and why (#124).
+
+    Three lists rather than one because the causes are different and each needs
+    its own diagnosis:
+
+    - ``collisions`` — the target is occupied by something that is **not ours**,
+      so it is not ours to replace.
+    - ``unrestorable`` — the quarantined copy is no longer there to restore.
+    - ``failed`` — a restoration operation was attempted and raised. That covers
+      both ways this path restores: writing the pre-command bytes back, and
+      removing a file this invocation created whose snapshot says it was absent
+      before.
+
+    **Ownership is the discriminator, not occupancy.** A ``failed`` entry can
+    perfectly well have a file at the target — the failed-removal case does,
+    because the file is the one this invocation created. Saying ``failed`` means
+    "nothing occupies the path" was contradicted by the very test written to
+    cover it.
+
+    Collapsing any two prints a diagnosis that is not true: folding ``failed``
+    into ``collisions`` asserts an occupant that is not ours when there may be
+    no such occupant at all. That is the mistake this split exists to prevent,
+    and it recurred once inside the split's own introduction — which is why each
+    cause is defined by what happened, never by what is at the path.
+
+    None is a silent skip — every one is reported, and any of them means the
+    result is not an exact restoration.
+    """
+
+    collisions: list[str]
+    unrestorable: list[str]
+    failed: list[str]
+
+    def __bool__(self) -> bool:
+        return bool(self.collisions or self.unrestorable or self.failed)
+
+
+def _recovery_outcome_detail(outcome: "RestoreOutcome", quarantine: Path) -> str:
+    """The operator-facing tail of a rollback message.
+
+    Empty when everything went back, so the caller's own error reads cleanly.
+    """
+    if not outcome:
+        return "; active archives were restored"
+    parts = []
+    if outcome.collisions:
+        parts.append(
+            "could not restore (something else occupies the path; the quarantined "
+            f"copy is kept under {quarantine}): " + ", ".join(outcome.collisions)
+        )
+    if outcome.unrestorable:
+        parts.append(
+            "could not restore (the quarantined copy is no longer available, so "
+            "this is not an exact restoration): " + ", ".join(outcome.unrestorable)
+        )
+    if outcome.failed:
+        # Its own cause and its own wording. Folding a write failure into
+        # `collisions` would print "something else occupies the path" for a path
+        # nothing occupies — the same collapse `RestoreOutcome` exists to avoid.
+        parts.append(
+            "could not restore (the restoration operation failed, so this is not "
+            "an exact restoration): " + ", ".join(outcome.failed)
+        )
+    return "; " + "; ".join(parts)
+
+
+def snapshot_local_artifacts(repo_root: Path | str) -> dict[str, str | None]:
+    """Pre-command bytes of every non-archive artifact recovery may replace.
+
+    AC3 requires derived views, decisions *and* the sync state restored to exact
+    pre-command bytes and presence — not just the archives, which the quarantine
+    move already accounts for. `None` records "absent before", so restoring
+    presence means removing a file this invocation created.
+
+    Taken before the first move, so it describes the state the operator had.
+    """
+    from . import writer
+
+    root = Path(repo_root)
+    history_dir = root / writer.AGENT_HISTORY_DIRNAME
+    guard_contained_path(root, history_dir)
+    snapshot: dict[str, str | None] = {}
+    # `_REPLACE_TAIL` already carries DECISIONS.md, LATEST.md, INDEX.yaml and
+    # RESUME_PROMPT.txt; only the sync state is additional.
+    for name in (*_REPLACE_TAIL, SYNC_STATE_FILENAME):
+        target = history_dir / name
+        guard_contained_path(root, target)
+        try:
+            snapshot[name] = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            snapshot[name] = None
+    return snapshot
+
+
+def restore_local_artifacts(
+    repo_root: Path | str,
+    snapshot: dict[str, str | None],
+    ledger: dict[str, str] | None,
+) -> tuple[list[str], list[str]]:
+    """Put the non-archive artifacts back; report collisions and write failures.
+
+    Same provenance rule as the archive side: only an artifact this invocation
+    wrote, and that still matches what it wrote, may be replaced. Anything else
+    is an external collision and is left alone.
+    """
+    from . import writer
+
+    root = Path(repo_root)
+    history_dir = root / writer.AGENT_HISTORY_DIRNAME
+    guard_contained_path(root, history_dir)
+    collisions: list[str] = []
+    failed: list[str] = []
+    for name, original in sorted(snapshot.items()):
+        target = history_dir / name
+        guard_contained_path(root, target)
+        if not target.exists() and original is None:
+            continue
+        if target.exists() and not _is_own_materialization(root, target, name, ledger):
+            if _reads_as(root, target, original):
+                continue
+            collisions.append(name)
+            continue
+        try:
+            if original is None:
+                target.unlink()
+            else:
+                _atomic_write(root, target, original)
+        except OSError:
+            # A failure *inside* the rollback is still a restore failure, and
+            # AC2 requires every one of them reported. Letting it escape here
+            # would replace the caller's actionable error with a traceback and
+            # abandon the artifacts after it in the loop (#124).
+            failed.append(name)
+    return collisions, failed
+
+
+def _reads_as(root: Path, target: Path, expected: str | None) -> bool:
+    """True when *target* already holds *expected* — nothing to restore.
+
+    ``root`` so the read is guarded in this body, not one call away (#88).
+    """
+    if expected is None:
+        return False
+    guard_contained_path(root, target)
+    try:
+        return target.read_text(encoding="utf-8") == expected
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def _atomic_write(root: Path, target: Path, text: str) -> None:
+    """Stage-and-replace one restored artifact, never writing in place (#82).
+
+    The cleanup is the same one `_write_recorded` performs, for the same stated
+    reason: *"a half-written sibling is still a file the vault did not have
+    before"*. It matters more here, not less — this is the restoration path, and
+    AC3 constrains it to exact pre-command bytes **and presence**, so residue
+    from a failed rollback is itself a violation of what the rollback promised.
+    """
+    staging = _free_staging_sibling(root, target)
+    guard_contained_path(root, staging)
+    guard_contained_path(root, target)
+    try:
+        staging.write_text(text, encoding="utf-8")
+        os.replace(staging, target)
+    except Exception:
+        staging.unlink(missing_ok=True)
+        raise
+
+
 def restore_quarantined(
-    repo_root: Path | str, quarantine: Path, moved: list[str]
-) -> list[str]:
-    """Move quarantined archives back, and report anything that could not return.
+    repo_root: Path | str,
+    quarantine: Path,
+    moved: list[str],
+    ledger: dict[str, str] | None = None,
+) -> RestoreOutcome:
+    """Move quarantined archives back, and report everything that could not return.
 
-    The rollback half of #120. A recovery that quarantines and then fails at
-    materialization used to leave active history empty with the derived views
-    naming files that had moved — and the retry reported "nothing to recover",
-    because there were no duplicates left to find.
+    The rollback half of #120, completed by #124's provenance rule. Every
+    source/target combination has a defined outcome and none overlap:
 
-    **Never overwrites.** A path that reappeared while the operation ran keeps
-    what is there and the quarantined copy stays put; the caller surfaces it
-    rather than deciding. That is #93's rule applied to the way back: this
-    command's whole promise is that nothing is destroyed, and a rollback that
-    clobbers is still destruction.
+    ==============================  ==========================================
+    state                           outcome
+    ==============================  ==========================================
+    source gone                     unrestorable — recorded, never a silent skip
+    target absent                   restored: no occupant to overwrite
+    target is this run's write,      replaced: restoring our own materialization
+    still matching the ledger        is not overwriting an operator
+    target present, unrecorded or   collision — retained, reported
+    no longer matching
+    ==============================  ==========================================
 
-    The quarantine directory is removed only when it is left empty, so a
-    partially-restored one remains visible with its remaining contents.
+    The ledger is what makes the third row safe. #93's rule protects *"a file an
+    operator happened to leave there"*; a file this invocation wrote moments ago
+    is not that. Requiring it to *still match* covers the rest: an artifact we
+    wrote can still have been changed by someone else since, and replacing it
+    then would destroy a concurrent writer's work while looking authorised.
+
+    The quarantine directory is removed only when it is left empty, so anything
+    unresolved stays visible with its remaining contents.
     """
     from . import writer
 
@@ -1353,22 +1542,56 @@ def restore_quarantined(
     sessions_dir = root / writer.AGENT_HISTORY_DIRNAME / SESSIONS_DIRNAME
     guard_contained_path(root, sessions_dir)
     guard_contained_path(root, quarantine)
-    stranded: list[str] = []
+    collisions: list[str] = []
+    unrestorable: list[str] = []
+    failed: list[str] = []
     for relative_path in sorted(moved):
         source = quarantine / Path(relative_path).name
         target = sessions_dir / Path(relative_path).name
         guard_contained_path(root, source)
         guard_contained_path(root, target)
         if not source.exists():
+            unrestorable.append(relative_path)
             continue
-        if target.exists():
-            stranded.append(relative_path)
+        if target.exists() and not _is_own_materialization(root, target, relative_path, ledger):
+            collisions.append(relative_path)
             continue
-        os.replace(source, target)
+        try:
+            os.replace(source, target)
+        except OSError:
+            # The mirror of `restore_local_artifacts`' own guard. Letting this
+            # escape replaced the caller's actionable error with a traceback and
+            # abandoned every archive after it in the loop — leaving active
+            # history empty with no report at all (#124).
+            failed.append(relative_path)
     if quarantine.is_dir() and not any(quarantine.iterdir()):
         quarantine.rmdir()
-    return stranded
+    return RestoreOutcome(
+        collisions=collisions, unrestorable=unrestorable, failed=failed
+    )
 
+
+def _is_own_materialization(
+    root: Path, target: Path, relative_path: str, ledger: dict[str, str] | None
+) -> bool:
+    """True when *target* is this invocation's own write, unchanged since.
+
+    Both halves are required. Unrecorded means we cannot prove we wrote it;
+    changed means someone else has, and either way the occupant is not ours to
+    replace.
+
+    ``root`` is taken so the read is guarded *in this body*: `unguarded_fs_targets`
+    matches guards to targets within one function, and a guard one call away is
+    how the ordering defects in #82 and #92 hid.
+    """
+    if ledger is None or relative_path not in ledger:
+        return False
+    guard_contained_path(root, target)
+    try:
+        return target.read_text(encoding="utf-8") == ledger[relative_path]
+    except (OSError, UnicodeDecodeError):
+        # Unreadable is "cannot prove it is ours", which is the safe answer.
+        return False
 
 
 def plan_duplicate_recovery(repo_root: Path | str) -> dict[str, list[str]]:
@@ -1418,7 +1641,18 @@ def quarantine_duplicates(
         guard_contained_path(root, source)
         target = quarantine / Path(relative_path).name
         guard_contained_path(root, target)
-        os.replace(source, target)
+        try:
+            os.replace(source, target)
+        except OSError as exc:
+            # The moves this helper already made are its own to undo, and only
+            # it knows them: `moved` is local, so a raise here used to discard
+            # the ledger entirely and the caller's rollback — which begins after
+            # this call returns — never saw a path to restore (#124).
+            outcome = restore_quarantined(root, quarantine, moved)
+            raise VaultError(
+                f"could not quarantine {relative_path}: {exc}"
+                + _recovery_outcome_detail(outcome, quarantine)
+            ) from exc
         moved.append(relative_path)
     return quarantine, moved
 
@@ -1624,6 +1858,7 @@ def import_project(
     vault_root: Path | str,
     project_id: str,
     admitted: set[str] | None = None,
+    ledger: dict[str, str] | None = None,
 ) -> str:
     """Import the vault into the local history; return the resulting state digest."""
     root = Path(repo_root)
@@ -1696,7 +1931,7 @@ def import_project(
         read_vault_decisions(namespace, admitted),
     )
 
-    _materialize_local(root, materialized, derived, decisions)
+    _materialize_local(root, materialized, derived, decisions, ledger)
 
     digest = state_digest(vault_state)
     write_sync_state(root, project_id, digest)
@@ -1704,7 +1939,11 @@ def import_project(
 
 
 def _materialize_local(
-    root: Path, archives: dict[str, str], derived: dict[str, str], decisions: str
+    root: Path,
+    archives: dict[str, str],
+    derived: dict[str, str],
+    decisions: str,
+    ledger: dict[str, str] | None = None,
 ) -> None:
     """Replace local history with *archives* and *derived*, staged and reversible.
 
@@ -1728,6 +1967,14 @@ def _materialize_local(
         write.stage(DECISIONS_FILENAME, decisions)
     for name, text in derived.items():
         write.stage(name, text)
+    if ledger is not None:
+        # Every staged artifact, not only `sessions/*.md`: #124's AC3 requires
+        # derived views, decisions and the sync state restored to exact
+        # pre-command bytes, and the rollback can only prove ownership of what
+        # it recorded. Recorded before `commit` so a fault mid-write still
+        # leaves the caller a truthful account of what this invocation intended
+        # to write.
+        ledger.update(write.staged())
     write.commit()
 
 

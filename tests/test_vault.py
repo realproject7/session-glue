@@ -2846,9 +2846,9 @@ def test_restore_quarantined_puts_the_archives_back(checkout):
     quarantine, moved = vault.quarantine_duplicates(checkout, plan, "20260828T120000Z")
     assert vault.read_local_archives(checkout) == {}
 
-    stranded = vault.restore_quarantined(checkout, quarantine, moved)
+    outcome = vault.restore_quarantined(checkout, quarantine, moved)
 
-    assert stranded == []
+    assert outcome.collisions == [] and outcome.unrestorable == []
     assert sorted(vault.read_local_archives(checkout)) == [
         "sessions/000-earlier.md", "sessions/2026-08-28-1200-alpha.md",
     ]
@@ -2868,9 +2868,10 @@ def test_the_rollback_refuses_to_overwrite_a_reappeared_path(checkout):
     reappeared = checkout / ".agent-history" / vault.SESSIONS_DIRNAME / "000-earlier.md"
     reappeared.write_text("something else arrived here\n", encoding="utf-8")
 
-    stranded = vault.restore_quarantined(checkout, quarantine, moved)
+    outcome = vault.restore_quarantined(checkout, quarantine, moved)
 
-    assert stranded == ["sessions/000-earlier.md"]
+    assert outcome.collisions == ["sessions/000-earlier.md"]
+    assert outcome.unrestorable == []
     assert reappeared.read_text(encoding="utf-8") == "something else arrived here\n"
     assert (quarantine / "000-earlier.md").is_file(), "the quarantined copy was destroyed"
     assert quarantine.is_dir(), "a partially-restored quarantine must stay visible"
@@ -3025,3 +3026,252 @@ def test_containment_is_still_enforced(tmp_path, checkout):
 
     with pytest.raises(vault.VaultError, match="outside repo_root"):
         vault.migrate_roots(checkout, "2026-08-28-1200-alpha", outside)
+
+
+# --------------------------------------------------------------------------- #
+# Issue #124 — the recovery path is one transaction, on both sides of the move
+# --------------------------------------------------------------------------- #
+
+
+def _quarantined(checkout):
+    _local_duplicate_archive(checkout, "000-earlier")
+    plan = vault.plan_duplicate_recovery(checkout)
+    return vault.quarantine_duplicates(checkout, plan, "20260828T120000Z")
+
+
+def test_a_missing_target_is_restored_not_treated_as_a_collision(checkout):
+    """The rule's first arm: an absent path has no occupant to overwrite."""
+    quarantine, moved = _quarantined(checkout)
+
+    outcome = vault.restore_quarantined(checkout, quarantine, moved)
+
+    assert outcome.collisions == [] and outcome.unrestorable == []
+    assert sorted(vault.read_local_archives(checkout)) == [
+        "sessions/000-earlier.md", "sessions/2026-08-28-1200-alpha.md",
+    ]
+
+
+def test_a_still_matching_transaction_owned_target_is_replaced(checkout):
+    """The arm #124 adds: restoring over this invocation's own write.
+
+    The ledger is what makes it safe — #93 protects a file an *operator* left
+    there, and this is not one.
+    """
+    quarantine, moved = _quarantined(checkout)
+    sessions = checkout / writer.AGENT_HISTORY_DIRNAME / vault.SESSIONS_DIRNAME
+    materialized = "the bytes this operation wrote\n"
+    (sessions / "000-earlier.md").write_text(materialized, encoding="utf-8")
+    ledger = {"sessions/000-earlier.md": materialized}
+
+    outcome = vault.restore_quarantined(checkout, quarantine, moved, ledger)
+
+    assert outcome.collisions == [] and outcome.unrestorable == []
+    assert (sessions / "000-earlier.md").read_text(encoding="utf-8") != materialized
+
+
+def test_a_ledgered_target_that_changed_is_a_collision(checkout):
+    """Ownership is not enough: someone may have changed our write since.
+
+    Replacing it then would destroy a concurrent writer's work while looking
+    authorised, which is why the rule says *still-matching*.
+    """
+    quarantine, moved = _quarantined(checkout)
+    sessions = checkout / writer.AGENT_HISTORY_DIRNAME / vault.SESSIONS_DIRNAME
+    (sessions / "000-earlier.md").write_text("changed by someone else\n", encoding="utf-8")
+    ledger = {"sessions/000-earlier.md": "the bytes this operation wrote\n"}
+
+    outcome = vault.restore_quarantined(checkout, quarantine, moved, ledger)
+
+    assert outcome.collisions == ["sessions/000-earlier.md"]
+    assert (sessions / "000-earlier.md").read_text(encoding="utf-8") == (
+        "changed by someone else\n"
+    )
+    assert (quarantine / "000-earlier.md").is_file(), "the quarantined copy was destroyed"
+
+
+def test_an_unrecorded_target_is_a_collision(checkout):
+    """No ledger entry means we cannot prove we wrote it — the safe answer."""
+    quarantine, moved = _quarantined(checkout)
+    sessions = checkout / writer.AGENT_HISTORY_DIRNAME / vault.SESSIONS_DIRNAME
+    (sessions / "000-earlier.md").write_text("an operator put this here\n", encoding="utf-8")
+
+    outcome = vault.restore_quarantined(checkout, quarantine, moved, ledger={})
+
+    assert outcome.collisions == ["sessions/000-earlier.md"]
+
+
+def test_an_unavailable_source_is_reported_not_skipped(checkout):
+    """#124's blocker: the silent `continue` at the source side.
+
+    Never a silent success or an unreported skip — the operator must be told
+    that this is not an exact restoration.
+    """
+    quarantine, moved = _quarantined(checkout)
+    (quarantine / "000-earlier.md").unlink()
+
+    outcome = vault.restore_quarantined(checkout, quarantine, moved)
+
+    assert outcome.unrestorable == ["sessions/000-earlier.md"]
+    assert outcome.collisions == []
+    assert bool(outcome) is True
+
+
+def test_a_failed_quarantine_move_reverses_its_earlier_moves(checkout, monkeypatch):
+    """Gap 1: the helper's own moves are its own to undo.
+
+    `moved` is local to the helper, so a raise used to discard the ledger and
+    the caller's rollback — which begins after this call returns — never saw a
+    path to restore.
+    """
+    _local_duplicate_archive(checkout, "000-earlier")
+    before = {p.name: p.read_bytes() for p in
+              (checkout / writer.AGENT_HISTORY_DIRNAME / vault.SESSIONS_DIRNAME).glob("*.md")}
+    plan = vault.plan_duplicate_recovery(checkout)
+    real = os.replace
+    calls = {"n": 0}
+
+    def flaky(source, target):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("injected failure on the second move")
+        return real(source, target)
+
+    monkeypatch.setattr(vault.os, "replace", flaky)
+
+    with pytest.raises(vault.VaultError, match="could not quarantine"):
+        vault.quarantine_duplicates(checkout, plan, "20260828T120000Z")
+
+    assert {p.name: p.read_bytes() for p in
+            (checkout / writer.AGENT_HISTORY_DIRNAME / vault.SESSIONS_DIRNAME).glob("*.md")} == before
+    assert not list((checkout / writer.AGENT_HISTORY_DIRNAME).glob("quarantine-*"))
+
+
+def test_a_failed_rollback_write_leaves_no_staging_residue(checkout, monkeypatch):
+    """RE2's finding: `_atomic_write` omitted `_write_recorded`'s cleanup.
+
+    A half-written sibling is still a file the history did not have before, and
+    this is the *restoration* path — AC3 constrains it to exact pre-command
+    bytes **and presence**, so residue from a failed rollback violates the very
+    thing the rollback promised. The failure is also reported rather than
+    escaping, because AC2 requires every restore failure to be actionable.
+    """
+    history = checkout / writer.AGENT_HISTORY_DIRNAME
+    snapshot = vault.snapshot_local_artifacts(checkout)
+    (history / "INDEX.yaml").write_text("rewritten by this operation\n", encoding="utf-8")
+    ledger = {"INDEX.yaml": "rewritten by this operation\n"}
+    real = os.replace
+
+    def failing(source, target):
+        if str(target).endswith("INDEX.yaml"):
+            raise OSError("injected failure inside the rollback")
+        return real(source, target)
+
+    monkeypatch.setattr(vault.os, "replace", failing)
+
+    collisions, failed = vault.restore_local_artifacts(checkout, snapshot, ledger)
+
+    # Its own cause, not folded into collisions: nothing occupies the path, so
+    # reporting it as one would print a diagnosis that is not true.
+    assert failed == ["INDEX.yaml"], "the rollback failure was not reported"
+    assert collisions == []
+    assert not list(history.glob("*.partial")), "a half-written sibling was left behind"
+
+
+def test_a_failed_archive_restore_is_reported_not_escaped(checkout, monkeypatch):
+    """RE2's round-2 finding: the mirror of the same defect, one function up.
+
+    `restore_local_artifacts` was guarded in round 2 and `restore_quarantined`
+    was not, so its `os.replace` escaped — replacing the caller's actionable
+    error with a traceback and abandoning every archive after it in the loop,
+    which left active history empty with no report at all. Worse than the
+    original gap-1 symptom, which at least restored the archives.
+    """
+    quarantine, moved = _quarantined(checkout)
+    real = os.replace
+
+    def failing(source, target):
+        if str(target).endswith("000-earlier.md"):
+            raise OSError("injected failure inside the archive restore")
+        return real(source, target)
+
+    monkeypatch.setattr(vault.os, "replace", failing)
+
+    outcome = vault.restore_quarantined(checkout, quarantine, moved)
+
+    assert outcome.failed == ["sessions/000-earlier.md"]
+    assert outcome.collisions == [] and outcome.unrestorable == []
+    # The loop continued: the other archive still came back.
+    assert "sessions/2026-08-28-1200-alpha.md" in vault.read_local_archives(checkout)
+    assert (quarantine / "000-earlier.md").is_file(), "the quarantined copy was lost"
+
+
+def test_the_three_causes_are_reported_with_distinct_wording(checkout):
+    """Each cause gets its own diagnosis — the reason `RestoreOutcome` is split."""
+    quarantine = checkout / writer.AGENT_HISTORY_DIRNAME / "quarantine-x"
+
+    detail = vault._recovery_outcome_detail(
+        vault.RestoreOutcome(collisions=["a.md"], unrestorable=["b.md"], failed=["c.md"]),
+        quarantine,
+    )
+
+    assert "something else occupies the path" in detail
+    assert "no longer available" in detail
+    assert "the restoration operation failed" in detail
+
+
+def test_a_failed_removal_is_reported_in_the_same_bucket(checkout, monkeypatch):
+    """RE1: `failed` covers both restoration operations, not only the write.
+
+    Restoring *presence* for a file this invocation created means removing it,
+    and that `unlink` can fail too. Naming the bucket "write failure" was
+    accurate for one path and wrong for the other — the claim was narrower than
+    the code it described.
+    """
+    history = checkout / writer.AGENT_HISTORY_DIRNAME
+    absent = "RESUME_PROMPT.txt"
+    (history / absent).unlink(missing_ok=True)
+    snapshot = vault.snapshot_local_artifacts(checkout)
+    assert snapshot[absent] is None, "the fixture must start with the file absent"
+    created = "created by this operation\n"
+    (history / absent).write_text(created, encoding="utf-8")
+    ledger = {absent: created}
+
+    import pathlib
+
+    def failing_unlink(self, *a, **k):
+        raise OSError("injected failure removing a file we created")
+
+    monkeypatch.setattr(pathlib.Path, "unlink", failing_unlink)
+
+    collisions, failed = vault.restore_local_artifacts(checkout, snapshot, ledger)
+
+    assert failed == [absent], "the failed removal was not reported"
+    assert collisions == []
+
+
+def test_failed_does_not_imply_an_empty_target(checkout, monkeypatch):
+    """RE1: `failed` said "nothing occupying the path", which its own case disproves.
+
+    Ownership is the discriminator, not occupancy — a failed restoration can
+    have a file sitting at the target, because that file is the one this
+    invocation created. Pinned so the description cannot drift back.
+    """
+    import pathlib
+
+    history = checkout / writer.AGENT_HISTORY_DIRNAME
+    name = "RESUME_PROMPT.txt"
+    (history / name).unlink(missing_ok=True)
+    snapshot = vault.snapshot_local_artifacts(checkout)
+    created = "created by this operation\n"
+    (history / name).write_text(created, encoding="utf-8")
+    monkeypatch.setattr(
+        pathlib.Path, "unlink",
+        lambda self, *a, **k: (_ for _ in ()).throw(OSError("injected")),
+    )
+
+    collisions, failed = vault.restore_local_artifacts(checkout, snapshot, {name: created})
+
+    assert failed == [name]
+    # The defining point: the target is occupied, and it is still not a collision.
+    assert (history / name).exists()
+    assert collisions == []
