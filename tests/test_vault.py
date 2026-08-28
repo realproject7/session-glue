@@ -936,12 +936,27 @@ _GUARD_CALLS = frozenset({
     "_read_text", "reject_symlink", "assert_within",
 })
 
-#: Functions that reach the filesystem without a guard *by design*. Each entry
-#: is a claim someone must defend at review; an empty reason is not accepted.
+#: Filesystem calls that are unguarded *by design*, keyed by `function.verb` so
+#: an exemption covers one operation rather than a whole body -- a blanket
+#: function-level waiver would re-open every other call in it, which is the
+#: pressure a false positive creates. Each entry is a claim someone must defend
+#: at review; an empty reason is not accepted, and an entry that stops being
+#: needed is reported as stale rather than left to rot.
+#:
+#: Both entries below are the same pattern: a path recovered from a list that
+#: only ever received targets already proven contained. The sweep does not trace
+#: values through containers, so it cannot see that -- a limit, stated here
+#: rather than papered over.
 _UNGUARDED_BY_DESIGN = {
-    "Creations.undo": (
-        "deletes only paths recorded during a guarded write, so every target "
-        "was proven contained on the way in"
+    "Creations.undo.unlink": "removes only files recorded during a guarded write",
+    "Creations.undo.rmdir": "removes only directories recorded during a guarded write",
+    "LocalWrite.commit.unlink": (
+        "rollback path: every target in `applied` went through `_prepare_target` "
+        "in the try body before it was appended"
+    ),
+    "LocalWrite.commit.write_bytes": (
+        "rollback path: restores the bytes of a target `_prepare_target` already "
+        "proved contained on the way in"
     ),
 }
 
@@ -957,10 +972,18 @@ _MODULE_RECEIVERS = frozenset({"os", "os.path", "shutil", "pathlib"})
 #: the source alone proves nothing about where the write went.
 _TWO_PATH_VERBS = frozenset({"replace", "rename", "copy", "copy2", "copytree", "move"})
 
-#: Link creation. The receiver is the node created inside the tree and must be
-#: contained; the argument is what it points *at*, which is outside the tree by
-#: design -- requiring containment there would forbid symlinks rather than
-#: contain them.
+#: Link creation, which this module may not do at all. Containment alone is the
+#: wrong test for it: guarding the receiver is *correct* and *complete* -- the
+#: link node is created inside the tree, and the argument is what it points at,
+#: which is outside by design. Requiring a guard on the pointee would forbid
+#: symlinks rather than contain them, and for the wrong reason.
+#:
+#: But "contained" is not the property that matters here. #88 exists to refuse
+#: symlinks that leave the vault, so a helper that *creates* one is planting
+#: exactly what every other guard in this module refuses to follow. Nothing in
+#: `vault.py` creates a link today, so these are refused outright and a future
+#: helper that needs one has to argue for it in `_UNGUARDED_BY_DESIGN` rather
+#: than inherit a pass from guarding the one operand that was never in doubt.
 _LINK_VERBS = frozenset({"symlink_to", "hardlink_to"})
 
 
@@ -1020,14 +1043,21 @@ def _normalize(text):
 def unguarded_fs_targets(source):
     """Every filesystem target in *source* not proven contained before it is touched.
 
-    Closed by default: each filesystem call must be preceded, in the same
-    function body, by a guard call that names *that* target. Presence of some
-    guard elsewhere in the body is not enough -- that is the hole this replaced,
-    where one guarded path excused a second unguarded one.
+    Closed by default, and the check is **dominance**, not line order: a guard
+    counts for a filesystem call only if it is certain to have run first. Guards
+    are carried *into* nested blocks but never back *out* of them, so a guard
+    inside an `if`, an `except`, or a loop body -- any of which may not execute
+    -- does not clear a call that follows the block. A guard and its call in the
+    same loop body is fine, which is the shape `read_local_archives` uses.
 
-    Returns `(offenders, allowlisted_but_guarded)`.
+    Presence of some guard elsewhere in the body proves nothing: the guard must
+    name *that* target. Returns `(offenders, allowlisted_but_guarded)`.
     """
     import ast
+
+    #: Fields whose contents are conditional or repeated, so guards inside them
+    #: cannot be carried out to the statements that follow.
+    _BLOCK_FIELDS = ("body", "orelse", "finalbody", "handlers")
 
     tree = ast.parse(source)
     parents = {}
@@ -1043,7 +1073,41 @@ def unguarded_fs_targets(source):
             parent = parents.get(parent)
         return node.name
 
-    offenders, stale = [], []
+    def calls_in(node):
+        """Calls in *node*, in evaluation order, not descending into nested blocks."""
+        found = []
+        for child in ast.walk(node):
+            if isinstance(child, ast.Call):
+                found.append(child)
+        return sorted(found, key=lambda c: (c.lineno, c.col_offset))
+
+    def scan(node, proven, report):
+        """Walk one statement list, threading the set of paths proven so far."""
+        for stmt in node:
+            # A nested def is its own scope with its own callers: it is analysed
+            # separately, and must not inherit proof from where it was written.
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+
+            blocks, own = [], []
+            for field, value in ast.iter_fields(stmt):
+                if field in _BLOCK_FIELDS and isinstance(value, list):
+                    blocks.append(value)
+                elif isinstance(value, list):
+                    own.extend(v for v in value if isinstance(v, ast.AST))
+                elif isinstance(value, ast.AST):
+                    own.append(value)
+
+            for expr in sorted(own, key=lambda n: (getattr(n, "lineno", 0),
+                                                   getattr(n, "col_offset", 0))):
+                for call in calls_in(expr):
+                    report(call, proven)
+
+            for block in blocks:
+                # A copy: what a branch proves stays in the branch.
+                scan(block, set(proven), report)
+
+    offenders, exercised = [], set()
     for node in ast.walk(tree):
         # Methods are walked exactly like module functions: every raw byte-level
         # operation in vault.py lives on a class, so a sweep that missed them
@@ -1051,37 +1115,37 @@ def unguarded_fs_targets(source):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         name = qualname(node)
+        found = []
 
-        proven = []   # (lineno, normalized target expression)
-        touches = []  # (lineno, verb, normalized target expression)
-        for child in ast.walk(node):
-            if not isinstance(child, ast.Call):
-                continue
-            func = child.func
+        def report(call, proven, _found=found):
+            func = call.func
             called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-            if called in _GUARD_CALLS:
-                proven.extend(
-                    (child.lineno, _normalize(ast.get_source_segment(source, arg)))
-                    for arg in child.args
-                )
             if called in _FS_VERBS:
-                touches.extend(
-                    (child.lineno, called, operand)
-                    for operand in _path_operands(source, child)
-                )
+                for operand in _path_operands(source, call):
+                    ok = called not in _LINK_VERBS and operand in proven
+                    why = "creates a link" if called in _LINK_VERBS else "is unguarded"
+                    _found.append((call.lineno, called, operand, ok, why))
+            # Added after the call is checked, so a guard cannot clear the very
+            # call it is an argument to -- and so a guard placed after the write
+            # it protects does not count.
+            if called in _GUARD_CALLS:
+                for arg in call.args:
+                    proven.add(_normalize(ast.get_source_segment(source, arg)))
 
-        if not touches:
-            continue
-        if name in _UNGUARDED_BY_DESIGN:
-            if proven:
-                stale.append(name)
-            continue
-        for lineno, verb, target in touches:
-            # `<= lineno`: a guard on the same line still runs first, and a guard
-            # *after* the call it is meant to protect does not count -- writing
-            # then checking is the ordering bug this catches.
-            if not any(at <= lineno and expr == target for at, expr in proven):
-                offenders.append(f"{name} touches {target or '?'} via .{verb}() at line {lineno}")
+        scan(node.body, set(), report)
+
+        for lineno, verb, target, ok, why in found:
+            if ok:
+                continue
+            key = f"{name}.{verb}"
+            if key in _UNGUARDED_BY_DESIGN:
+                exercised.add(key)
+                continue
+            offenders.append(
+                f"{name} {why}: {target or '?'} via .{verb}() at line {lineno}"
+            )
+
+    stale = sorted(set(_UNGUARDED_BY_DESIGN) - exercised)
     return offenders, stale
 
 
@@ -1099,6 +1163,10 @@ def test_every_vault_helper_reaching_the_filesystem_guards_containment():
     * It matches guards to targets *syntactically*. A guard whose containment
       root is the wrong root still satisfies it; only the behavioural symlink
       tests above catch that.
+    * It does not trace values through containers. A path recovered from a list
+      that only ever held guarded paths reads as unproven -- which is why the
+      two rollback paths need `_UNGUARDED_BY_DESIGN` entries rather than being
+      recognised automatically.
     * `_FS_VERBS` is a closed list of names. A filesystem call through a verb
       nobody has thought of -- a new stdlib helper, an aliased method -- is
       invisible until the name is added here. `os.symlink`/`os.link` are omitted
@@ -1114,7 +1182,7 @@ def test_every_vault_helper_reaching_the_filesystem_guards_containment():
 
     offenders, stale = unguarded_fs_targets(inspect.getsource(vault))
     assert offenders == [], "unguarded filesystem access in vault.py: " + "; ".join(offenders)
-    assert stale == [], f"these are guarded now, remove them from the allowlist: {stale}"
+    assert stale == [], f"no longer needed, remove them from the allowlist: {stale}"
     assert all(_UNGUARDED_BY_DESIGN.values()), "every allowlist entry needs a stated reason"
 
 
@@ -1171,6 +1239,14 @@ def _swap(root, staged, target):
     guard_contained_path(root, staged)
     shutil.move(staged, target)
 """,
+    # Guarding the receiver is correct for containment and still not enough:
+    # `vault.py` has no business creating the thing its every other guard
+    # refuses to follow.
+    "a symlink created at a fully guarded path": """
+def _plant(root, link, external):
+    guard_contained_path(root, link)
+    link.symlink_to(external)
+""",
     "a directory removal": """
 def _prune(directory):
     directory.rmdir()
@@ -1181,6 +1257,35 @@ def _prune(directory):
 def _late(root, target):
     target.write_text("x")
     guard_contained_path(root, target)
+""",
+    # Line order is not dominance. A guard that only *might* have run does not
+    # clear a call that always runs, so guards never escape their block.
+    "a guard inside an if branch": """
+def _maybe(root, target, flag):
+    if flag:
+        guard_contained_path(root, target)
+    target.write_text("x")
+""",
+    "a guard inside an except handler": """
+def _maybe(root, target):
+    try:
+        pass
+    except OSError:
+        guard_contained_path(root, target)
+    target.write_text("x")
+""",
+    "a guard inside a loop body, with the write after the loop": """
+def _maybe(root, target, items):
+    for _ in items:
+        guard_contained_path(root, target)
+    target.write_text("x")
+""",
+    "a guard in the if branch, write in the else branch": """
+def _maybe(root, target, flag):
+    if flag:
+        guard_contained_path(root, target)
+    else:
+        target.write_text("x")
 """,
 }
 
@@ -1217,13 +1322,30 @@ def _fine(root, staged, target):
     guard_contained_path(root, target)
     staged.replace(target)
 """,
-    # The pointee of a symlink is outside the tree by definition -- that is what
-    # a symlink is. Only the node being created has to be contained, or the
-    # sweep would be forbidding symlinks rather than containing them.
-    "a symlink created at a guarded path": """
-def _fine(root, link, external):
-    guard_contained_path(root, link)
-    link.symlink_to(external)
+    # Guards are carried *into* nested blocks -- this is `read_marker`'s shape.
+    "a guard at body level with the write inside a try": """
+def _fine(root, target):
+    guard_contained_path(root, target)
+    try:
+        return target.read_text()
+    except OSError:
+        return ""
+""",
+    # ...and a guard beside its own call inside a loop is fine, which is how
+    # `read_local_archives` guards each entry it iterates over.
+    "a guard and its read in the same loop body": """
+def _fine(root, directory):
+    guard_contained_path(root, directory)
+    for path in directory.glob("*.md"):
+        guard_contained_path(root, path)
+        yield path.read_text()
+""",
+    "a guard at body level with the write nested two blocks deep": """
+def _fine(root, target, flag, items):
+    guard_contained_path(root, target)
+    if flag:
+        for _ in items:
+            target.write_text("x")
 """,
 }
 
