@@ -8,6 +8,8 @@ useful standard anywhere in this module.
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 
 from session_glue import schema, validator, vault, writer
@@ -719,3 +721,751 @@ def test_vault_writes_use_lf_regardless_of_platform(tmp_path, checkout):
         next((namespace / "sessions").glob("*.md")),
     ):
         assert b"\r\n" not in path.read_bytes(), path
+
+
+# --------------------------------------------------------------------------- #
+# Issue #88 — containment sweep across every vault source and target
+# --------------------------------------------------------------------------- #
+
+
+def _outside(tmp_path, name, text="secret from outside\n"):
+    """A file the operator never meant this tool to touch."""
+    external = tmp_path / "outside" / name
+    external.parent.mkdir(parents=True, exist_ok=True)
+    external.write_text(text, encoding="utf-8")
+    return external
+
+
+@pytest.fixture()
+def synced(tmp_path):
+    """A checkout and a folder vault that have already agreed once."""
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write_history(root)
+    vault.export_project(root, vault_root, "alpha")
+    return root, vault_root
+
+
+def test_push_refuses_a_symlinked_local_history_ancestor(tmp_path):
+    """AC1: the ancestor, not the leaf — each archive file is a real file."""
+    external = tmp_path / "elsewhere"
+    (external / "sessions").mkdir(parents=True)
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write_history(root)
+    real_history = root / ".agent-history"
+    stolen = tmp_path / "stolen-history"
+    real_history.rename(stolen)
+    real_history.symlink_to(stolen, target_is_directory=True)
+
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.export_project(root, vault_root, "alpha")
+    assert not (vault_root / vault.PROJECTS_DIRNAME / "alpha").exists()
+
+
+@pytest.mark.parametrize(
+    "relative", ["", "sessions", "state"], ids=["namespace", "sessions", "state"]
+)
+def test_pull_refuses_a_symlinked_vault_source(tmp_path, synced, relative):
+    """AC2 + AC6, pull half: foreign content must not reach the local history.
+
+    Asserted as *behaviour*, not as "an exception was raised". Without the guard
+    some of these still raise — a symlink to an empty directory surfaces as
+    "absent or empty", which is a VaultError too — so a bare `pytest.raises`
+    would pass for a reason that has nothing to do with containment. The
+    external side is therefore populated with real, well-formed vault content:
+    without the guard the import *succeeds* and materializes it.
+
+    `conflicts/` is deliberately absent — `import_project` never calls
+    `read_manifest`, so pull does not read it. It is covered on resolve below,
+    where it is actually read.
+    """
+    root, vault_root = synced
+    namespace = vault_root / vault.PROJECTS_DIRNAME / "alpha"
+
+    # A complete foreign vault namespace, so nothing fails for lack of content.
+    foreign_repo = tmp_path / "foreign-repo"
+    foreign_repo.mkdir()
+    _write_history(foreign_repo, session_id="2026-09-09-0900-not-yours")
+    foreign_vault = tmp_path / "foreign-vault"
+    foreign_vault.mkdir()
+    vault.export_project(foreign_repo, foreign_vault, "alpha")
+    foreign_namespace = foreign_vault / vault.PROJECTS_DIRNAME / "alpha"
+
+    target = namespace / relative if relative else namespace
+    source = foreign_namespace / relative if relative else foreign_namespace
+    import shutil
+
+    if target.exists():
+        shutil.rmtree(target)
+    target.symlink_to(source, target_is_directory=True)
+
+    other = tmp_path / "second"
+    other.mkdir()
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.import_project(other, vault_root, "alpha")
+
+    # The point of the ticket: the external target was never read into place.
+    landed = other / ".agent-history" / "sessions"
+    assert not landed.exists() or not any(landed.glob("*not-yours*"))
+
+
+def test_sync_state_read_refuses_a_symlinked_ancestor_before_deciding_identity(
+    tmp_path, synced
+):
+    """AC3: the read that feeds require_project_id and the bootstrap qualifier.
+
+    A foreign VAULT-SYNC.yaml reachable through a symlinked `.agent-history`
+    would let the one-project-ID guard decide identity from someone else's
+    digest — the identity check reading through the hole it exists to close.
+    """
+    root, vault_root = synced
+    foreign = tmp_path / "outside" / ".agent-history"
+    foreign.mkdir(parents=True)
+    (foreign / "VAULT-SYNC.yaml").write_text(
+        "project_id: someone-else\nlast_remote_state_sha256: " + "0" * 64 + "\n",
+        encoding="utf-8",
+    )
+
+    import shutil
+
+    shutil.rmtree(root / ".agent-history")
+    (root / ".agent-history").symlink_to(foreign, target_is_directory=True)
+
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.read_sync_state(root)
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.require_project_id(root, "alpha")
+
+
+def test_local_index_read_refuses_a_symlinked_ancestor(tmp_path, synced):
+    """AC3: INDEX.yaml feeds lifecycle merge and head selection."""
+    root, _ = synced
+    foreign = tmp_path / "outside" / ".agent-history"
+    foreign.mkdir(parents=True)
+    (foreign / "INDEX.yaml").write_text(
+        "schema_version: 1\nlatest_session: not-yours\nsessions: []\n", encoding="utf-8"
+    )
+
+    import shutil
+
+    shutil.rmtree(root / ".agent-history")
+    (root / ".agent-history").symlink_to(foreign, target_is_directory=True)
+
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.read_state_local(root)
+
+
+def test_sync_state_write_refuses_a_symlinked_ancestor_and_leaves_it_untouched(
+    tmp_path
+):
+    """AC4: the only *mutating* site in the enumeration."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    foreign = tmp_path / "outside" / ".agent-history"
+    foreign.mkdir(parents=True)
+    sentinel = foreign / "VAULT-SYNC.yaml"
+    sentinel.write_text("project_id: untouched\n", encoding="utf-8")
+    (root / ".agent-history").symlink_to(foreign, target_is_directory=True)
+
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.write_sync_state(root, "alpha", "0" * 64)
+    assert sentinel.read_text(encoding="utf-8") == "project_id: untouched\n"
+
+
+def test_decisions_read_refuses_rather_than_silently_reading_empty(tmp_path, synced):
+    """`_read_text` swallows OSError, so an unguarded redirect reads as "none".
+
+    Every other read raises; this one would merge silently, which is why the
+    guard has to run before the try rather than inside it.
+    """
+    root, vault_root = synced
+    namespace = vault_root / vault.PROJECTS_DIRNAME / "alpha"
+    external = _outside(tmp_path, "DECISIONS.md", "- someone else's decision\n")
+    (namespace / vault.DECISIONS_FILENAME).symlink_to(external)
+
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.export_project(root, vault_root, "alpha")
+
+
+def test_pull_refuses_a_symlinked_local_history_root(tmp_path, synced):
+    """The gap the AC5 sweep surfaced: `.agent-history` was created before it was checked.
+
+    `import_project` ran `history_dir.mkdir(parents=True, exist_ok=True)` and
+    only reached a containment guard later, inside `LocalWrite.commit`. A
+    symlinked `.agent-history` pointing at an existing directory makes that
+    `mkdir` a silent no-op rather than an error, so the redirected root survived
+    until the first write.
+
+    Nothing leaked either way — `commit` refuses before any byte lands, which is
+    why this test passes without the guard too. It is here to pin the ordering,
+    and it is the behavioural half of a finding the sweep makes structurally.
+    """
+    root, vault_root = synced
+    external = tmp_path / "elsewhere"
+    external.mkdir()
+    history = root / writer.AGENT_HISTORY_DIRNAME
+    shutil.rmtree(history)
+    history.symlink_to(external)
+
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.import_project(root, vault_root, "alpha")
+
+    assert list(external.iterdir()) == []
+
+
+#: Filesystem verbs that read or write content or structure. Existence probes
+#: (`exists`, `is_file`, `is_dir`, `is_symlink`) are excluded deliberately: they
+#: leak no content and including them would drown the signal.
+_FS_VERBS = frozenset({
+    "read_text", "write_text", "read_bytes", "write_bytes",
+    "iterdir", "glob", "rglob", "walk",
+    "mkdir", "rmdir", "unlink", "rename", "replace", "touch", "symlink_to",
+    "open", "hardlink_to", "chmod", "copy", "copy2", "copytree", "move",
+})
+
+#: Calls that establish containment for the path handed to them. Each takes the
+#: path it proves as one of its arguments, which is what lets the sweep match a
+#: guard to a *target* rather than merely to a function body.
+#:
+#: `writer.reject_symlink` is **not** here, and its absence is the point.
+#: It tests one path for being a symlink and says nothing about the path's
+#: ancestors -- which is exactly the leaf-only shape #88 exists to remove: a
+#: symlinked `sessions/` leaves `target.is_symlink()` false while the access
+#: still lands outside the tree. Accepting it as proof would let the sweep
+#: certify the defect it was built to catch. `vault.py` calls it only through
+#: `guard_contained_path`, which walks root → every ancestor → leaf, so nothing
+#: in the module depends on it counting.
+#:
+#: `assert_within` *is* here on its own merit: it compares `path.resolve()`
+#: against the resolved root, and resolution follows symlinks, so a redirected
+#: ancestor lands outside the root and is refused.
+_GUARD_CALLS = frozenset({
+    "guard_contained_path", "_prepare_target", "_write_recorded",
+    "_read_text", "assert_within",
+})
+
+#: Filesystem calls that are unguarded *by design*, keyed by the exact operation
+#: -- `(function, verb, target expression)` -- and carrying **how many** such
+#: calls the reason covers.
+#:
+#: The count is the point. Keying by function alone waives a whole body; keying
+#: by `function.verb` still waives *every* `unlink` in that method, so a future
+#: unrelated `target.unlink()` would inherit a justification written for the
+#: rollback. An exemption is a claim about specific calls, so it says how many
+#: it is willing to defend: the (n+1)th is an offender, a different target is an
+#: offender, and an entry covering more calls than exist is reported stale.
+#:
+#: Line numbers are deliberately *not* part of the key. They would make every
+#: edit above a call look like a new exemption, and the resulting churn teaches
+#: reviewers to re-stamp the allowlist without reading it.
+#:
+#: All four entries are the same pattern: a path recovered from a list that only
+#: ever received targets already proven contained. The sweep does not trace
+#: values through containers, so it cannot see that -- a limit, stated here
+#: rather than papered over.
+_UNGUARDED_BY_DESIGN = {
+    ("Creations.undo", "unlink", "target"): (
+        1, "removes only files recorded during a guarded write"
+    ),
+    ("Creations.undo", "rmdir", "directory"): (
+        1, "removes only directories recorded during a guarded write"
+    ),
+    ("LocalWrite.commit", "unlink", "target"): (
+        1,
+        "rollback path: every target in `applied` went through `_prepare_target` "
+        "in the try body before it was appended",
+    ),
+    ("LocalWrite.commit", "write_bytes", "target"): (
+        1,
+        "rollback path: restores the bytes of a target `_prepare_target` already "
+        "proved contained on the way in",
+    ),
+}
+
+
+#: Receivers that are modules rather than paths. `os.replace(a, b)` is an
+#: attribute call whose receiver is `os`, so without this the sweep would take
+#: the module name as the path operand -- flagging the call, but for a reason
+#: that has nothing to do with either path it touches.
+_MODULE_RECEIVERS = frozenset({"os", "os.path", "shutil", "pathlib"})
+
+#: Verbs with a *second* path operand. Both ends land in the filesystem and the
+#: destination is the one that decides where bytes come to rest, so a guard on
+#: the source alone proves nothing about where the write went.
+_TWO_PATH_VERBS = frozenset({"replace", "rename", "copy", "copy2", "copytree", "move"})
+
+# A verb missing from `_FS_VERBS` is never scanned at all, whatever this set
+# says about how to read its operands. `copy2` sat here and not there, so the
+# operand model knew how to read a call the sweep never asked about. Asserted
+# rather than left for the next reader to notice.
+assert not _TWO_PATH_VERBS - _FS_VERBS, sorted(_TWO_PATH_VERBS - _FS_VERBS)
+
+#: Link creation, which this module may not do at all. Containment alone is the
+#: wrong test for it: guarding the receiver is *correct* and *complete* -- the
+#: link node is created inside the tree, and the argument is what it points at,
+#: which is outside by design. Requiring a guard on the pointee would forbid
+#: symlinks rather than contain them, and for the wrong reason.
+#:
+#: But "contained" is not the property that matters here. #88 exists to refuse
+#: symlinks that leave the vault, so a helper that *creates* one is planting
+#: exactly what every other guard in this module refuses to follow. Nothing in
+#: `vault.py` creates a link today, so these are refused outright and a future
+#: helper that needs one has to argue for it in `_UNGUARDED_BY_DESIGN` rather
+#: than inherit a pass from guarding the one operand that was never in doubt.
+_LINK_VERBS = frozenset({"symlink_to", "hardlink_to"})
+
+
+def _path_operands(source, call):
+    """Every path expression a filesystem call acts on.
+
+    `p.write_text(...)` acts on `p`; a bare `open(p)` acts on its first argument.
+    A two-path verb acts on both ends: `staged.replace(target)` and
+    `os.replace(staged, target)` each have to prove `target`, which is the
+    operand that decides where the bytes land.
+
+    Trailing `.parent` hops are stripped because a guard on `p` proves every
+    ancestor of `p` too -- that is exactly `guard_contained_path`'s contract --
+    so `p.parent.mkdir()` is covered by a guard naming `p`.
+    """
+    import ast
+
+    func = call.func
+    verb = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+    receiver_is_path = (
+        isinstance(func, ast.Attribute)
+        and _normalize(ast.get_source_segment(source, func.value)) not in _MODULE_RECEIVERS
+    )
+
+    if receiver_is_path:
+        nodes = [func.value]
+        if verb in _TWO_PATH_VERBS and call.args:
+            nodes.append(call.args[0])
+    else:
+        # Bare `open(p)`, or module-qualified `os.replace(src, dst)` where the
+        # receiver is a module and the operands are all in the argument list.
+        nodes = list(call.args[: 2 if verb in _TWO_PATH_VERBS else 1])
+    if verb in _LINK_VERBS:
+        nodes = nodes[:1]
+
+    operands = []
+    for node in nodes:
+        while isinstance(node, ast.Attribute) and node.attr == "parent":
+            node = node.value
+        operands.append(_normalize(ast.get_source_segment(source, node)))
+    return operands
+
+
+def _normalize(text):
+    """Collapse `Path(x)` to `x` so the two spellings of one path compare equal."""
+    if text is None:
+        return None
+    text = " ".join(text.split())
+    while text.startswith("Path(") and text.endswith(")"):
+        inner = text[len("Path("):-1]
+        if inner.count("(") != inner.count(")"):
+            break
+        text = inner.strip()
+    return text
+
+
+def unguarded_fs_targets(source):
+    """Every filesystem target in *source* not proven contained before it is touched.
+
+    Closed by default, and the check is **dominance**, not line order: a guard
+    counts for a filesystem call only if it is certain to have run first. Guards
+    are carried *into* nested blocks but never back *out* of them, so a guard
+    inside an `if`, an `except`, or a loop body -- any of which may not execute
+    -- does not clear a call that follows the block. A guard and its call in the
+    same loop body is fine, which is the shape `read_local_archives` uses.
+
+    Presence of some guard elsewhere in the body proves nothing: the guard must
+    name *that* target. Returns `(offenders, allowlisted_but_guarded)`.
+    """
+    import ast
+
+    #: Fields whose contents are conditional or repeated, so guards inside them
+    #: cannot be carried out to the statements that follow.
+    _BLOCK_FIELDS = ("body", "orelse", "finalbody", "handlers")
+
+    tree = ast.parse(source)
+    parents = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def qualname(node):
+        parent = parents.get(node)
+        while parent is not None:
+            if isinstance(parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                return f"{parent.name}.{node.name}"
+            parent = parents.get(parent)
+        return node.name
+
+    def calls_in(node):
+        """Calls in *node*, in evaluation order, not descending into nested blocks."""
+        found = []
+        for child in ast.walk(node):
+            if isinstance(child, ast.Call):
+                found.append(child)
+        return sorted(found, key=lambda c: (c.lineno, c.col_offset))
+
+    def scan(node, proven, report):
+        """Walk one statement list, threading the set of paths proven so far."""
+        for stmt in node:
+            # A nested def is its own scope with its own callers: it is analysed
+            # separately, and must not inherit proof from where it was written.
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+
+            blocks, own = [], []
+            for field, value in ast.iter_fields(stmt):
+                if field in _BLOCK_FIELDS and isinstance(value, list):
+                    blocks.append(value)
+                elif isinstance(value, list):
+                    own.extend(v for v in value if isinstance(v, ast.AST))
+                elif isinstance(value, ast.AST):
+                    own.append(value)
+
+            for expr in sorted(own, key=lambda n: (getattr(n, "lineno", 0),
+                                                   getattr(n, "col_offset", 0))):
+                for call in calls_in(expr):
+                    report(call, proven)
+
+            for block in blocks:
+                # A copy: what a branch proves stays in the branch.
+                scan(block, set(proven), report)
+
+    import collections
+
+    offenders, seen = [], collections.Counter()
+    for node in ast.walk(tree):
+        # Methods are walked exactly like module functions: every raw byte-level
+        # operation in vault.py lives on a class, so a sweep that missed them
+        # would miss the calls that matter most.
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        name = qualname(node)
+        found = []
+
+        def report(call, proven, _found=found):
+            func = call.func
+            called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if called in _FS_VERBS:
+                for operand in _path_operands(source, call):
+                    ok = called not in _LINK_VERBS and operand in proven
+                    why = "creates a link" if called in _LINK_VERBS else "is unguarded"
+                    _found.append((call.lineno, called, operand, ok, why))
+            # Added after the call is checked, so a guard cannot clear the very
+            # call it is an argument to -- and so a guard placed after the write
+            # it protects does not count.
+            if called in _GUARD_CALLS:
+                for arg in call.args:
+                    proven.add(_normalize(ast.get_source_segment(source, arg)))
+
+        scan(node.body, set(), report)
+
+        for lineno, verb, target, ok, why in sorted(found):
+            if ok:
+                continue
+            key = (name, verb, target)
+            allowed = _UNGUARDED_BY_DESIGN.get(key, (0, ""))[0]
+            seen[key] += 1
+            if seen[key] <= allowed:
+                continue
+            extra = (
+                f" -- the allowlist covers {allowed}, this is #{seen[key]}"
+                if allowed
+                else ""
+            )
+            offenders.append(
+                f"{name} {why}: {target or '?'} via .{verb}() at line {lineno}{extra}"
+            )
+
+    stale = sorted(
+        f"{name}.{verb}({target}) covers {allowed}, found {seen[(name, verb, target)]}"
+        for (name, verb, target), (allowed, _) in _UNGUARDED_BY_DESIGN.items()
+        if seen[(name, verb, target)] < allowed
+    )
+    return offenders, stale
+
+
+def test_every_vault_helper_reaching_the_filesystem_guards_containment():
+    """AC5: closed by default -- a new unguarded filesystem target fails this test.
+
+    Walks the module AST rather than matching substrings, so it sees class
+    methods as well as module functions, cannot be fooled by a name that merely
+    contains a verb, and does not let one guarded path in a body excuse an
+    unguarded second one.
+
+    **What it does not prove**, stated because a sweep that overstates itself is
+    worse than none:
+
+    * It matches guards to targets *syntactically*. A guard whose containment
+      root is the wrong root still satisfies it; only the behavioural symlink
+      tests above catch that.
+    * It does not trace values through containers. A path recovered from a list
+      that only ever held guarded paths reads as unproven -- which is why the
+      two rollback paths need `_UNGUARDED_BY_DESIGN` entries rather than being
+      recognised automatically.
+    * `_FS_VERBS` is a closed list of names. A filesystem call through a verb
+      nobody has thought of -- a new stdlib helper, an aliased method -- is
+      invisible until the name is added here. `os.symlink`/`os.link` are omitted
+      deliberately rather than overlooked: they place the new link at argument
+      *one*, inverting pathlib's order, and guessing that wrong would flag the
+      pointee and clear the link. Nothing in this module uses them; adding one
+      means teaching `_path_operands` the inversion first.
+    * It reasons per function body, so a path laundered through an unguarded
+      helper that this sweep clears for other reasons is not traced across the
+      call boundary.
+    """
+    import inspect
+
+    offenders, stale = unguarded_fs_targets(inspect.getsource(vault))
+    assert offenders == [], "unguarded filesystem access in vault.py: " + "; ".join(offenders)
+    assert stale == [], f"allowlist entries cover calls that no longer exist: {stale}"
+    assert all(
+        reason.strip() for _, reason in _UNGUARDED_BY_DESIGN.values()
+    ), "every allowlist entry needs a stated reason"
+
+
+#: Each case is source the sweep *must* flag, paired with why it would have
+#: slipped through the substring version this replaced. These are the sweep's
+#: own regression tests: without them "the sweep is closed by default" is a
+#: claim about a test, asserted nowhere.
+_MUST_BE_FLAGGED = {
+    "a new unguarded helper": """
+def _future_helper(path):
+    return path.read_text()
+""",
+    # The hole that made the previous sweep a checklist: it asked only whether
+    # *a* guard appeared somewhere in the body.
+    "a second target left unguarded beside a guarded one": """
+def _mixed(root, wanted, other):
+    guard_contained_path(root, wanted)
+    first = wanted.read_text()
+    return first + other.read_text()
+""",
+    # `inspect.isfunction` over module vars never saw these.
+    "an unguarded class method": """
+class Writer:
+    def commit(self, target):
+        target.write_bytes(b"x")
+""",
+    # #93 stages replacement writes with `os.replace`; the old verb list would
+    # not have matched it.
+    "a replacement write": """
+def _swap(staged, target):
+    os.replace(staged, target)
+""",
+    # A guard on the source proves nothing about where the bytes come to rest.
+    # The pathlib spelling is the dangerous one: the destination is an argument
+    # while the *receiver* is the guarded source, so a receiver-only sweep reads
+    # the call as fully guarded.
+    "a replacement whose destination is unguarded (pathlib form)": """
+def _swap(root, staged, target):
+    guard_contained_path(root, staged)
+    staged.replace(target)
+""",
+    "a replacement whose destination is unguarded (os form)": """
+def _swap(root, staged, target):
+    guard_contained_path(root, staged)
+    os.replace(staged, target)
+""",
+    "a rename whose destination is unguarded": """
+def _swap(root, staged, target):
+    guard_contained_path(root, staged)
+    staged.rename(target)
+""",
+    "a move whose destination is unguarded": """
+def _swap(root, staged, target):
+    guard_contained_path(root, staged)
+    shutil.move(staged, target)
+""",
+    # `copy2` was in `_TWO_PATH_VERBS` but not `_FS_VERBS`, so it was never
+    # scanned at all -- the operand model knew how to read it and the sweep
+    # never asked.
+    "a copy2 with neither end guarded": """
+def _clone(src, dst):
+    shutil.copy2(src, dst)
+""",
+    "a copy2 whose destination is unguarded": """
+def _clone(root, src, dst):
+    guard_contained_path(root, src)
+    shutil.copy2(src, dst)
+""",
+    # A leaf-only check is not containment. Accepting `reject_symlink` as proof
+    # would let the sweep certify the exact shape #88 exists to remove: this
+    # passes while a symlinked *ancestor* still redirects the read.
+    "a leaf-only reject_symlink standing in for containment": """
+def _leaf_only(path):
+    writer.reject_symlink(path)
+    return path.read_text()
+""",
+    # An exemption is a claim about specific calls, not a licence for the verb.
+    # These use the real allowlisted qualnames, so they are the exemption's own
+    # boundary rather than a lookalike.
+    "a second unguarded unlink beside an allowlisted one": """
+class LocalWrite:
+    def commit(self, target):
+        target.unlink()
+        target.unlink()
+""",
+    "an unguarded unlink on a different target in an allowlisted method": """
+class LocalWrite:
+    def commit(self, target, other):
+        target.unlink()
+        other.unlink()
+""",
+    "an unguarded verb the allowlisted method does not have an exemption for": """
+class LocalWrite:
+    def commit(self, target):
+        target.unlink()
+        target.write_text("x")
+""",
+    # Guarding the receiver is correct for containment and still not enough:
+    # `vault.py` has no business creating the thing its every other guard
+    # refuses to follow.
+    "a symlink created at a fully guarded path": """
+def _plant(root, link, external):
+    guard_contained_path(root, link)
+    link.symlink_to(external)
+""",
+    "a directory removal": """
+def _prune(directory):
+    directory.rmdir()
+""",
+    # Checking after touching is this repo's recurring shape, so the sweep is
+    # ordered rather than set-based.
+    "a guard placed after the write it protects": """
+def _late(root, target):
+    target.write_text("x")
+    guard_contained_path(root, target)
+""",
+    # Line order is not dominance. A guard that only *might* have run does not
+    # clear a call that always runs, so guards never escape their block.
+    "a guard inside an if branch": """
+def _maybe(root, target, flag):
+    if flag:
+        guard_contained_path(root, target)
+    target.write_text("x")
+""",
+    "a guard inside an except handler": """
+def _maybe(root, target):
+    try:
+        pass
+    except OSError:
+        guard_contained_path(root, target)
+    target.write_text("x")
+""",
+    "a guard inside a loop body, with the write after the loop": """
+def _maybe(root, target, items):
+    for _ in items:
+        guard_contained_path(root, target)
+    target.write_text("x")
+""",
+    "a guard in the if branch, write in the else branch": """
+def _maybe(root, target, flag):
+    if flag:
+        guard_contained_path(root, target)
+    else:
+        target.write_text("x")
+""",
+}
+
+#: Source the sweep must *not* flag. A check that fires on everything closes
+#: nothing, and two of these encode contracts the real module depends on.
+_MUST_BE_CLEAN = {
+    "a guarded read": """
+def _fine(root, target):
+    guard_contained_path(root, target)
+    return target.read_text()
+""",
+    # `guard_contained_path` proves the whole ancestry, so a guard on the leaf
+    # covers its parent -- which is how `_prepare_target` and `write_sync_state`
+    # are written.
+    "a parent derived from a guarded target": """
+def _fine(root, target):
+    guard_contained_path(root, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+""",
+    # `p.relative_to(p)` has no parts, so `guard_contained_path(p, p)` reduces
+    # to the root symlink check -- exact, not a special case.
+    "a path guarded as its own root": """
+def _fine(path):
+    guard_contained_path(path, path)
+    return any(path.iterdir())
+""",
+    "an existence probe": """
+def _fine(path):
+    return path.exists() and path.is_symlink()
+""",
+    "a replacement with both ends guarded": """
+def _fine(root, staged, target):
+    guard_contained_path(root, staged)
+    guard_contained_path(root, target)
+    staged.replace(target)
+""",
+    # Guards are carried *into* nested blocks -- this is `read_marker`'s shape.
+    "a guard at body level with the write inside a try": """
+def _fine(root, target):
+    guard_contained_path(root, target)
+    try:
+        return target.read_text()
+    except OSError:
+        return ""
+""",
+    # ...and a guard beside its own call inside a loop is fine, which is how
+    # `read_local_archives` guards each entry it iterates over.
+    "a guard and its read in the same loop body": """
+def _fine(root, directory):
+    guard_contained_path(root, directory)
+    for path in directory.glob("*.md"):
+        guard_contained_path(root, path)
+        yield path.read_text()
+""",
+    # Exactly the one call the reason defends, and no more.
+    "the single unguarded unlink the allowlist actually covers": """
+class LocalWrite:
+    def commit(self, target):
+        target.unlink()
+""",
+    "a guard at body level with the write nested two blocks deep": """
+def _fine(root, target, flag, items):
+    guard_contained_path(root, target)
+    if flag:
+        for _ in items:
+            target.write_text("x")
+""",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_MUST_BE_FLAGGED))
+def test_the_containment_sweep_flags_what_it_claims_to(case):
+    offenders, _ = unguarded_fs_targets(_MUST_BE_FLAGGED[case])
+    assert offenders, f"the sweep missed {case}, so it does not close the class"
+
+
+@pytest.mark.parametrize("case", sorted(_MUST_BE_CLEAN))
+def test_the_containment_sweep_accepts_a_properly_guarded_body(case):
+    offenders, _ = unguarded_fs_targets(_MUST_BE_CLEAN[case])
+    assert offenders == [], f"the sweep wrongly flagged {case}: {offenders}"
+
+
+def test_resolve_refuses_a_symlinked_conflicts_source(tmp_path, synced):
+    """AC2, resolve half: `conflicts/` is read by resolve, not by pull."""
+    root, vault_root = synced
+    namespace = vault_root / vault.PROJECTS_DIRNAME / "alpha"
+    external = tmp_path / "outside" / "conflicts"
+    external.mkdir(parents=True)
+    (external / "manifest.yaml").write_text(
+        "format: session-glue-vault-conflicts-v1\nconflicts: []\n", encoding="utf-8"
+    )
+    (namespace / vault.CONFLICTS_DIRNAME).symlink_to(external, target_is_directory=True)
+
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.read_manifest(namespace)

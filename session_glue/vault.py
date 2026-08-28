@@ -117,9 +117,17 @@ def validate_project_id(project_id: object) -> str:
 
 
 def project_dir(vault_root: Path, project_id: str) -> Path:
-    """Return ``<vault_root>/projects/<id>/`` after validating the id."""
+    """Return ``<vault_root>/projects/<id>/`` after validating id and containment.
+
+    Every namespace in this module originates here, so guarding the
+    ``<vault_root> → projects → <id>`` ancestry once makes it impossible for a
+    helper to receive a namespace that was never proven — the sweep #88 asks
+    for, rather than a checklist each new helper must remember to join.
+    """
     validate_project_id(project_id)
-    return Path(vault_root) / PROJECTS_DIRNAME / project_id
+    namespace = Path(vault_root) / PROJECTS_DIRNAME / project_id
+    guard_contained_path(Path(vault_root), namespace)
+    return namespace
 
 
 # --------------------------------------------------------------------------- #
@@ -340,6 +348,7 @@ def read_marker(namespace: Path, project_id: str) -> None:
     repair in place: the vault path never gets a fail-open rebuild.
     """
     marker_path = Path(namespace) / MARKER_FILENAME
+    guard_contained_path(Path(namespace), marker_path)
     try:
         raw = marker_path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -504,8 +513,15 @@ def sync_state_path(repo_root: Path | str) -> Path:
 
 
 def read_sync_state(repo_root: Path | str) -> dict[str, Any] | None:
-    """Return the local sync record, or ``None`` when this checkout is unsynced."""
+    """Return the local sync record, or ``None`` when this checkout is unsynced.
+
+    Guarded because its value feeds ``require_project_id`` and the bootstrap
+    qualifier: a redirected read here decides project identity from a foreign
+    digest, which is the identity guard reading through the hole it exists to
+    close.
+    """
     path = sync_state_path(repo_root)
+    guard_contained_path(Path(repo_root), path)
     if not path.is_file():
         return None
     try:
@@ -551,13 +567,16 @@ def render_sync_state(project_id: str, last_remote_state_sha256: str) -> str:
 _REPLACE_TAIL = ("DECISIONS.md", "LATEST.md", "INDEX.yaml", "RESUME_PROMPT.txt")
 
 
-def guard_write_path(containment_root: Path, target: Path) -> None:
+def guard_contained_path(containment_root: Path, target: Path) -> None:
     """Reject a symlink at *any* level from ``containment_root`` down to ``target``.
 
     Guarding only the leaf is not enough: a symlinked ``.agent-history`` or
-    ``sessions`` ancestor leaves ``target.is_symlink()`` false while the write
-    still lands outside the tree. Mirrors what ``create_handoff`` does for the
-    local history, applied to every write path this module owns.
+    ``sessions`` ancestor leaves ``target.is_symlink()`` false while the access
+    still lands outside the tree.
+
+    Named for containment rather than writing because #88 applies it to reads as
+    well: a redirected *read* exports someone else's data or imports content from
+    outside the vault, which is the same boundary failure in the other direction.
     """
     from . import writer
 
@@ -566,7 +585,7 @@ def guard_write_path(containment_root: Path, target: Path) -> None:
     try:
         relative = target.relative_to(root)
     except ValueError as exc:
-        raise VaultError(f"refusing to write outside {root}: {target}") from exc
+        raise VaultError(f"refusing to reach outside {root}: {target}") from exc
     writer.reject_symlink(root)
     current = root
     for part in relative.parts:
@@ -585,7 +604,7 @@ def _prepare_target(
     """
     from . import writer
 
-    guard_write_path(containment_root, target)
+    guard_contained_path(containment_root, target)
     if created_dirs is not None:
         # Bounded at the containment root explicitly. Nothing above it can be
         # missing today — a folder vault must already exist and a clone must be
@@ -705,6 +724,7 @@ def read_state(namespace: Path, required: bool = False) -> dict[str, Any]:
     last-writer-wins, which the conflict contract forbids.
     """
     path = state_path(namespace)
+    guard_contained_path(Path(namespace), path)
     if not path.is_file():
         if required:
             raise VaultUnavailable(
@@ -832,11 +852,12 @@ def read_local_archives(repo_root: Path | str) -> dict[str, str]:
     from . import writer
 
     sessions_dir = Path(repo_root) / writer.AGENT_HISTORY_DIRNAME / SESSIONS_DIRNAME
+    guard_contained_path(Path(repo_root), sessions_dir)
     archives: dict[str, str] = {}
     if not sessions_dir.is_dir():
         return archives
     for path in sorted(sessions_dir.glob("*.md")):
-        writer.reject_symlink(path)
+        guard_contained_path(Path(repo_root), path)
         archives[f"{SESSIONS_DIRNAME}/{path.name}"] = path.read_text(encoding="utf-8")
     return archives
 
@@ -850,10 +871,12 @@ def read_vault_archives(namespace: Path) -> dict[str, str]:
     only a full read distinguishes them.
     """
     sessions_dir = Path(namespace) / SESSIONS_DIRNAME
+    guard_contained_path(Path(namespace), sessions_dir)
     archives: dict[str, str] = {}
     if not sessions_dir.is_dir():
         return archives
     for path in sorted(sessions_dir.glob("*.md")):
+        guard_contained_path(Path(namespace), path)
         try:
             archives[f"{SESSIONS_DIRNAME}/{path.name}"] = path.read_text(encoding="utf-8")
         except OSError as exc:
@@ -921,6 +944,7 @@ def _head_session_id(repo_root: Path, archives: dict[str, str]) -> str:
     from . import writer
 
     index_path = Path(repo_root) / writer.AGENT_HISTORY_DIRNAME / writer.INDEX_FILENAME
+    guard_contained_path(Path(repo_root), index_path)
     if index_path.is_file():
         try:
             index = parse_mapping(index_path.read_text(encoding="utf-8"))
@@ -940,6 +964,7 @@ def read_state_local(repo_root: Path | str) -> dict[str, Any]:
     from . import writer
 
     index_path = Path(repo_root) / writer.AGENT_HISTORY_DIRNAME / writer.INDEX_FILENAME
+    guard_contained_path(Path(repo_root), index_path)
     if not index_path.is_file():
         return {"lifecycle": []}
     try:
@@ -957,6 +982,13 @@ def read_state_local(repo_root: Path | str) -> dict[str, Any]:
 def _namespace_is_empty(namespace: Path) -> bool:
     """True when ``projects/<id>/`` is absent or holds nothing."""
     path = Path(namespace)
+    # The namespace is its own root here. `guard_contained_path(p, p)` is exact
+    # rather than a special case: `p.relative_to(p)` is `.` with no parts, so the
+    # ancestor loop does not run and only the root check fires — which is the
+    # whole check when the target *is* the root. Spelling it this way keeps every
+    # containment call in this module one function, so none can be mistaken for
+    # the leaf-only shape #88 removes.
+    guard_contained_path(path, path)
     if not path.exists():
         return True
     return not any(path.iterdir())
@@ -1056,7 +1088,7 @@ def _publish(
     targets.append(state_path(path))
     targets.append(path / MARKER_FILENAME)
     for target in targets:
-        guard_write_path(root, target)
+        guard_contained_path(root, target)
 
     record = Creations() if created is None else created
     written = 0
@@ -1135,8 +1167,8 @@ def export_project(
             "lifecycle values disagree for: " + ", ".join(lifecycle_conflicts)
         )
 
-    decisions_local = _read_text(_local_decisions_path(root))
-    decisions_vault = _read_text(Path(namespace) / DECISIONS_FILENAME)
+    decisions_local = _read_text(root, _local_decisions_path(root))
+    decisions_vault = _read_text(Path(namespace), Path(namespace) / DECISIONS_FILENAME)
     merged_decisions = merge_decisions(decisions_local, decisions_vault)
 
     sync_state = read_sync_state(root)
@@ -1210,10 +1242,16 @@ def import_project(repo_root: Path | str, vault_root: Path | str, project_id: st
     derived = rebuild_derived(union, head, lifecycle)
 
     decisions = merge_decisions(
-        _read_text(_local_decisions_path(root)), _read_text(Path(namespace) / DECISIONS_FILENAME)
+        _read_text(root, _local_decisions_path(root)),
+        _read_text(Path(namespace), Path(namespace) / DECISIONS_FILENAME),
     )
 
     history_dir = root / writer.AGENT_HISTORY_DIRNAME
+    # Before the mkdir, not after: `LocalWrite.commit` does guard this root, but
+    # only once a write is already in flight. A symlinked `.agent-history` makes
+    # `mkdir(exist_ok=True)` a silent success, so the check that would catch it
+    # belongs ahead of the first call that touches the path.
+    guard_contained_path(root, history_dir)
     history_dir.mkdir(parents=True, exist_ok=True)
     write = LocalWrite(history_dir)
     for path, text in materialized.items():
@@ -1235,7 +1273,14 @@ def _local_decisions_path(repo_root: Path) -> Path:
     return Path(repo_root) / writer.AGENT_HISTORY_DIRNAME / DECISIONS_FILENAME
 
 
-def _read_text(path: Path) -> str:
+def _read_text(root: Path, path: Path) -> str:
+    """Read an optional artifact, treating absence as empty.
+
+    ``root`` is required rather than optional because this function *swallows*
+    ``OSError``: an unguarded redirected read would surface as "no decisions"
+    and merge silently, where every other read raises.
+    """
+    guard_contained_path(Path(root), Path(path))
     try:
         return Path(path).read_text(encoding="utf-8")
     except OSError:
@@ -1252,6 +1297,7 @@ def write_sync_state(repo_root: Path, project_id: str, digest: str) -> None:
     observe.
     """
     path = sync_state_path(repo_root)
+    guard_contained_path(Path(repo_root), path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_sync_state(project_id, digest), encoding="utf-8", newline="\n")
 
@@ -1315,6 +1361,7 @@ def build_conflict_candidates(
 
 def read_manifest(namespace: Path) -> list[dict[str, Any]]:
     path = Path(namespace) / CONFLICTS_DIRNAME / MANIFEST_FILENAME
+    guard_contained_path(Path(namespace), path)
     if not path.is_file():
         return []
     try:
@@ -1419,7 +1466,8 @@ def resolve_project(
     if merged_records:
         content[f"{CONFLICTS_DIRNAME}/{MANIFEST_FILENAME}"] = render_manifest(merged_records)
     decisions = merge_decisions(
-        _read_text(_local_decisions_path(root)), _read_text(Path(namespace) / DECISIONS_FILENAME)
+        _read_text(root, _local_decisions_path(root)),
+        _read_text(Path(namespace), Path(namespace) / DECISIONS_FILENAME),
     )
     if decisions:
         content[DECISIONS_FILENAME] = decisions
