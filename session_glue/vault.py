@@ -551,6 +551,38 @@ def render_sync_state(project_id: str, last_remote_state_sha256: str) -> str:
 _REPLACE_TAIL = ("DECISIONS.md", "LATEST.md", "INDEX.yaml", "RESUME_PROMPT.txt")
 
 
+def guard_write_path(containment_root: Path, target: Path) -> None:
+    """Reject a symlink at *any* level from ``containment_root`` down to ``target``.
+
+    Guarding only the leaf is not enough: a symlinked ``.agent-history`` or
+    ``sessions`` ancestor leaves ``target.is_symlink()`` false while the write
+    still lands outside the tree. Mirrors what ``create_handoff`` does for the
+    local history, applied to every write path this module owns.
+    """
+    from . import writer
+
+    root = Path(containment_root)
+    target = Path(target)
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise VaultError(f"refusing to write outside {root}: {target}") from exc
+    writer.reject_symlink(root)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        writer.reject_symlink(current)
+
+
+def _prepare_target(containment_root: Path, target: Path) -> None:
+    """Guard the whole ancestry, create parents, then re-assert containment."""
+    from . import writer
+
+    guard_write_path(containment_root, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    writer.assert_within(target.parent, Path(containment_root).resolve())
+
+
 class LocalWrite:
     """Staged replacement for every local-write path, with reverse rollback.
 
@@ -581,17 +613,14 @@ class LocalWrite:
         replaced; it exists so the rollback path is exercised by a test rather
         than asserted.
         """
-        from . import writer
-
         applied: list[tuple[Path, bytes | None]] = []
         try:
             for count, relative_path in enumerate(self._ordered()):
                 if fault_after is not None and count == fault_after:
                     raise VaultError("injected replace-phase fault")
                 target = self.history_dir / relative_path
-                writer.reject_symlink(target)
+                _prepare_target(self.history_dir, target)
                 original = target.read_bytes() if target.is_file() else None
-                target.parent.mkdir(parents=True, exist_ok=True)
                 applied.append((target, original))
                 target.write_text(self._staged[relative_path], encoding="utf-8")
         except Exception:
@@ -612,7 +641,7 @@ def state_path(namespace: Path) -> Path:
     return Path(namespace) / STATE_DIRNAME / STATE_FILENAME
 
 
-def read_state(namespace: Path) -> dict[str, Any]:
+def read_state(namespace: Path, required: bool = False) -> dict[str, Any]:
     """Read ``state/vault-state.yaml``; a malformed state is a hard error.
 
     Never falls back to a rebuilt-from-scratch state the way ``create_handoff``
@@ -621,6 +650,10 @@ def read_state(namespace: Path) -> dict[str, Any]:
     """
     path = state_path(namespace)
     if not path.is_file():
+        if required:
+            raise VaultUnavailable(
+                f"vault not fully available: {path} is missing while the namespace is populated"
+            )
         return {"head_session_id": "", "lifecycle": [], "acknowledgements": []}
     try:
         data = parse_mapping(path.read_text(encoding="utf-8"))
@@ -882,30 +915,52 @@ def _require_populated_namespace(namespace: Path, project_id: str) -> None:
             "refusing to adopt a marker-less namespace"
         )
     read_marker(path, project_id)
+    # A marker without state is a torn namespace, not an empty one: treating it
+    # as empty would let an export overwrite state it never read.
+    read_state(path, required=True)
 
 
-def _publish(namespace: Path, content: dict[str, str], state: dict[str, Any], project_id: str,
-             fault_after: int | None = None) -> None:
+def _publish(
+    vault_root: Path,
+    namespace: Path,
+    content: dict[str, str],
+    state: dict[str, Any],
+    project_id: str,
+    fault_after: int | None = None,
+) -> None:
     """Write content, then state, then the marker — in that order.
 
     The ordering is what makes a torn vault detectable rather than authoritative:
     a failure can leave unreferenced content, but never a state or marker
     pointing at content that is not there.
+
+    Every target is guarded the same way the local side is: a symlink at any
+    level between the vault root and the file is refused before the first write,
+    so a symlinked namespace or nested parent cannot redirect a write out of the
+    vault root.
     """
+    root = Path(vault_root)
     path = Path(namespace)
-    path.mkdir(parents=True, exist_ok=True)
+    targets = [path / relative_path for relative_path in sorted(content)]
+    targets.append(state_path(path))
+    targets.append(path / MARKER_FILENAME)
+    for target in targets:
+        guard_write_path(root, target)
+
     written = 0
     for relative_path in sorted(content):
         if fault_after is not None and written == fault_after:
             raise VaultError("injected publication fault")
         target = path / relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
+        _prepare_target(root, target)
         target.write_text(content[relative_path], encoding="utf-8")
         written += 1
     state_target = state_path(path)
-    state_target.parent.mkdir(parents=True, exist_ok=True)
+    _prepare_target(root, state_target)
     state_target.write_text(render_vault_state(state), encoding="utf-8")
-    (path / MARKER_FILENAME).write_text(render_marker(project_id), encoding="utf-8")
+    marker_target = path / MARKER_FILENAME
+    _prepare_target(root, marker_target)
+    marker_target.write_text(render_marker(project_id), encoding="utf-8")
 
 
 def export_project(
@@ -995,7 +1050,8 @@ def export_project(
             vault_state.get("acknowledgements", []), list(acknowledgements or [])
         ),
     }
-    _publish(namespace, content, new_state, project_id, fault_after=fault_after)
+    _publish(Path(vault_root), namespace, content, new_state, project_id,
+             fault_after=fault_after)
 
     digest = state_digest(new_state)
     _write_sync_state(root, project_id, digest)
@@ -1244,7 +1300,7 @@ def resolve_project(
             vault_state.get("acknowledgements", []), list(acknowledgements or [])
         ),
     }
-    _publish(namespace, content, new_state, project_id)
+    _publish(Path(vault_root), namespace, content, new_state, project_id)
     digest = state_digest(new_state)
     _write_sync_state(root, project_id, digest)
     return digest

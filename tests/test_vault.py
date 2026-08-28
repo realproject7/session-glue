@@ -632,3 +632,59 @@ def test_resolve_gates_a_pattern_matching_local_candidate_before_any_vault_write
         )
     assert "ghp_" + "c" * 20 not in str(excinfo.value)
     assert vault.state_path(vault_root / "projects" / "alpha").read_bytes() == before
+
+
+# --------------------------------------------------------------------------- #
+# Containment: a symlink at any level, on either side, must stop the write
+# --------------------------------------------------------------------------- #
+
+
+def test_symlinked_local_ancestor_blocks_the_write(tmp_path, checkout):
+    """Guarding only the leaf is insufficient — an ancestor redirects too."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    history = checkout / ".agent-history"
+    (history / "sessions").rename(tmp_path / "moved-sessions")
+    (history / "sessions").symlink_to(outside, target_is_directory=True)
+
+    write = vault.LocalWrite(history)
+    write.stage("sessions/2026-08-29-0900-new.md", "content\n")
+    with pytest.raises(writer.HandoffWriteError, match="symlink"):
+        write.commit()
+    assert list(outside.iterdir()) == []
+
+
+def test_symlinked_vault_namespace_blocks_publication(tmp_path, checkout):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    vault_root = tmp_path / "vault"
+    (vault_root / "projects").mkdir(parents=True)
+    (vault_root / "projects" / "alpha").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(writer.HandoffWriteError, match="symlink"):
+        vault.export_project(checkout, vault_root, "alpha")
+    assert list(outside.iterdir()) == []
+
+
+def test_marker_present_but_state_missing_is_unavailable(tmp_path, checkout):
+    """A torn namespace must not read as an empty one and be overwritten."""
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    vault.export_project(checkout, vault_root, "alpha")
+
+    namespace = vault_root / "projects" / "alpha"
+    state_file = vault.state_path(namespace)
+    original = state_file.read_bytes()
+    state_file.unlink()
+
+    with pytest.raises(vault.VaultUnavailable, match="not fully available"):
+        vault.export_project(checkout, vault_root, "alpha")
+    assert not state_file.exists()  # refused before any write
+
+    # The import side refuses the same torn namespace.
+    with pytest.raises(vault.VaultUnavailable, match="not fully available"):
+        vault.import_project(checkout, vault_root, "alpha")
+
+    # Restoring the state file makes both paths work again.
+    state_file.write_bytes(original)
+    assert vault.export_project(checkout, vault_root, "alpha")
