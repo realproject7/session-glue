@@ -380,10 +380,11 @@ conflicting copies are *moved* into a timestamped `.agent-history/quarantine-<st
 never deleted, and the authoritative set is then re-materialized from the vault. An
 archive whose `session_id` is unique keeps its content untouched. If anything fails after
 that move, the quarantined copies are put back and your history returns to its
-pre-command bytes — and the emptied quarantine directory is then removed, so a rollback
-that put everything back leaves no directory behind. Anything that could **not** go back
-is named in the error and stays in the quarantine, which is kept for exactly that reason:
-if you see one after a failure, it is holding something, and the error says what.
+pre-command bytes, and the emptied quarantine directory is normally removed with it.
+A quarantine that survives a failure is **not** by itself evidence that something was
+lost: it may be holding a copy that could not go back, or it may be empty and simply not
+removable — or not readable — at that moment. The error says which, and names anything
+that could not be restored. Read it rather than inferring from the directory.
 
 Normal local commands never take a vault flag. Sync exits `3` for a conflict you must
 resolve and `4` for a vault that is not fully available — two different problems, so
