@@ -381,8 +381,8 @@ never deleted, and the authoritative set is then re-materialized from the vault.
 archive whose `session_id` is unique keeps its content untouched. If anything fails after
 that move, the quarantined copies are put back and your history returns to its
 pre-command bytes — and where a copy cannot go back, the error names it rather than
-overwriting. The emptied quarantine directory is normally removed along with a rollback
-that returned everything.
+overwriting. The emptied quarantine directory is normally removed once nothing is left
+in it.
 A quarantine that survives a failure is **not** by itself evidence that something was
 lost: it may be holding a copy that could not go back, or it may be empty and simply not
 removable — or not readable — at that moment. The error says which, and names anything
