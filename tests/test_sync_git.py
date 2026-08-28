@@ -1380,3 +1380,38 @@ def test_a_custom_archive_name_is_still_admitted_on_a_subsequent_sync(
         "sync", "push", "--repo-root", str(root), "--project-id", "alpha",
         "--vault-git-dir", str(clone),
     ) == cli.EXIT_CONFLICT
+
+
+def test_the_admission_set_and_the_archive_listing_use_the_same_keys(
+    checkout, clone
+):
+    """The two key spaces that must agree, pinned in one place.
+
+    `tracked_artifacts` derives namespace-relative POSIX paths by prefix
+    arithmetic over `git ls-files`; `read_vault_archives` builds them as
+    `sessions/<name>`. Nothing else asserts that these agree, and a divergence
+    would over-filter — the failure mode with no symptom, since nothing deletes
+    a file and the guards simply stop firing. On a clean clone the sessions half
+    of the admission set must be exactly the listing.
+
+    Published twice on purpose: after the first push every artifact is
+    `replaced` rather than `created`, which is where #104's equivalent set went
+    wrong.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    _second_session(checkout)
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    listed = set(vault.read_vault_archives(clone / "projects" / "alpha"))
+    admitted = vaultgit.tracked_artifacts(clone, "alpha")
+
+    assert len(listed) == 2, "the fixture must publish something to compare"
+    assert {
+        path for path in admitted if path.startswith(f"{SESSIONS_DIRNAME}/")
+    } == listed
