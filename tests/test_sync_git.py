@@ -2268,7 +2268,11 @@ def test_a_failure_after_preflight_restores_the_pre_command_state(
     _baseline(checkout, clone)
     _duplicate_archive(checkout, "000-earlier")
     before = _history_state(checkout)
-    shutil.rmtree(bare_remote)
+    # Renamed rather than deleted: Git marks its object files read-only, and
+    # Windows refuses to unlink those, so `shutil.rmtree` raises PermissionError
+    # there and the test fails for a reason that has nothing to do with #120.
+    # A rename makes the fetch fail identically on every platform.
+    bare_remote.rename(bare_remote.with_name("vault.git.moved-away"))
 
     assert _run(
         "sync", "recover-duplicates", "--repo-root", str(checkout),
