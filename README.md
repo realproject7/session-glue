@@ -9,7 +9,7 @@
 
 Session Glue is a session-continuity protocol and CLI for coding agents (Claude Code, Codex, Cursor, and friends). When an agent session gets long, expensive, and forgetful, Session Glue freezes the useful context into a compact, repo-local briefing — and a fresh session picks up exactly where the old one left off, without dragging the whole chat history along.
 
-No daemon. No server. No database. No network. Just markdown files in your repo.
+No daemon. No server. No database. No network by default. Just markdown files in your repo — plus an opt-in [Personal Vault](#personal-vault--the-same-work-on-your-other-machine) when you explicitly ask to carry them to another machine.
 
 ## The problem
 
@@ -140,6 +140,185 @@ Two optional fields extend the model without taxing the common case: `decisions:
 - **Decisions that don't decay** — `DECISIONS.md` keeps them verbatim across dozens of sessions instead of re-litigating them.
 - **Drift you can see** — handoffs record the branch and commit they were written at; `glue status --git` / `glue validate --git` warn when the repo has moved on.
 
+## Personal Vault — the same work on your other machine
+
+Everything above is local by default and stays that way. If you also want a handoff you
+froze on your laptop to be waiting on your desktop, Session Glue offers an **opt-in
+Personal Vault**: one command, run by you, naming exactly where the vault is.
+
+It is deliberately unambitious. There is no daemon, no background sync, no provider
+integration, and no account. A vault is either **a folder** (which your own cloud-sync
+client happens to keep in step) or **a private Git repository you already cloned**. Every
+normal Session Glue command keeps working exactly as before, with no vault flags.
+
+```bash
+glue sync push --repo-root . --project-id my-app --vault-dir ~/vaults/session-glue
+glue sync pull --repo-root . --project-id my-app --vault-dir ~/vaults/session-glue
+```
+
+The `--project-id` is the logical identity of this project across your devices. It is
+**never inferred** — you name it every time, and the same ID on both machines is what
+links them.
+
+### Two devices, folder vault
+
+Device A has a history; the vault side is empty. The first **push** bootstraps it:
+
+```bash
+# Device A — publish
+glue sync push --repo-root . --project-id my-app --vault-dir ~/vaults/session-glue
+# → vault state 4f2c…
+
+# Device B — adopt
+glue sync pull --repo-root . --project-id my-app --vault-dir ~/vaults/session-glue
+# → .agent-history/ now carries Device A's sessions; resume as usual
+```
+
+Bootstrapping is a property of `push` alone, and only when the vault side is genuinely
+empty **and** this checkout has never synced this project before. (`pull` has nothing to
+import from an empty vault, so it reports that as unavailable.) Once a checkout has a
+stored baseline, an absent vault is treated as unavailability rather than a fresh start —
+so a half-materialized cloud folder can never be mistaken for "nothing here yet" and
+silently overwritten.
+
+### Two devices, Git vault
+
+Identical commands, one different flag. The clone must already exist, be on a branch, and
+have an upstream configured — Session Glue does not create, clone, or authenticate
+anything:
+
+```bash
+git clone git@github.com:you/your-private-vault.git ~/vaults/session-glue-git   # you do this, once
+
+glue sync push --repo-root . --project-id my-app --vault-git-dir ~/vaults/session-glue-git
+glue sync pull --repo-root . --project-id my-app --vault-git-dir ~/vaults/session-glue-git
+```
+
+Each vault-mutating operation fetches, fast-forwards, and produces **exactly one commit**,
+which is then pushed to the branch's own upstream. The local record of "what the vault
+holds" advances only after that push succeeds — a commit that never left your machine is
+not a sync that happened.
+
+### When both sides moved
+
+If both devices changed the same session since they last agreed, the sync stops and tells
+you so. **Nothing is discarded and nothing is auto-merged.** You resolve by naming every
+choice explicitly:
+
+```bash
+glue sync resolve --repo-root . --project-id my-app --vault-dir ~/vaults/session-glue \
+  --head-session 2026-08-20-0930-refactor-parser \
+  --archive 2026-08-19-1400-add-index=local \
+  --lifecycle 2026-08-19-1400-add-index=vault
+```
+
+**Both** sides are retained under the vault's `conflicts/archives/<session-id>/`, each
+under its own content digest, alongside a `conflicts/manifest.yaml` recording them — not
+just the one you rejected. A resolution is therefore always recoverable, and a wrong call
+is never terminal.
+
+A session that exists only on this device is never a conflict at all: local-only archives
+are preserved through push and pull rather than being treated as something the vault
+"deleted".
+
+### When the vault isn't all there yet
+
+Cloud-sync folders materialize lazily. If Session Glue sees a vault that is present but
+incomplete, it refuses with `vault not fully available` and a distinct exit code, rather
+than reading a half-written state:
+
+```console
+$ glue sync push --repo-root . --project-id my-app --vault-dir ~/vaults/session-glue
+glue sync: vault not fully available: ~/vaults/session-glue/projects/my-app is absent or
+empty, but this checkout has synced this project before; wait for the sync client rather
+than re-initializing
+$ echo $?
+4
+```
+
+**Wait for your sync client to finish, then run the command again yourself.** Session Glue
+never retries, polls, or waits in a loop.
+
+One caveat stated plainly, because it is irreducible rather than a bug: on a device that
+has **no stored digest for this project yet**, an empty vault namespace that simply hasn't
+materialized is indistinguishable from a genuinely new project. That first sync on a new
+device is the one moment the tool cannot tell the two apart, so make sure your sync client
+has settled before running it.
+
+### Roots have to be inside the repo
+
+A handoff records `repo_root` and `project_root`. For a handoff to mean anything on another
+machine, those absolute paths are rewritten to a `<vault-root>` placeholder on export —
+which is only possible when `project_root` **is `repo_root` or a directory inside it**.
+
+An archive whose `project_root` points outside the repository has no device-independent
+form, so it is not exportable. The fix is explicit, local, and touches no vault:
+
+```bash
+glue sync migrate-roots --repo-root . \
+  --session-id 2026-08-19-1400-add-index --project-root .
+```
+
+That rewrites only those two scalars in the named archive and rebuilds the derived views.
+
+### Before anything leaves your machine
+
+Push and resolve run a privacy gate over every artifact that is about to be shared. If
+something looks secret-shaped, the command **blocks** and prints an acknowledgement
+challenge — a path, a SHA-256, and a label. It never echoes the matched text back at you.
+
+```console
+$ glue sync push --repo-root . --project-id my-app --vault-dir ~/vaults/session-glue
+glue sync: blocked by privacy gate; acknowledge the exact triple to proceed:
+  --acknowledge sessions/2026-08-20-0930-refactor-parser.md:7b562c00…a3f1fd:GitHub token (ghp_/gho_)
+```
+
+Copy the triple back to proceed. Do so deliberately: it is bound to that exact
+`(path, sha256, label)` — acknowledging one finding never acknowledges another, and editing
+the file invalidates the acknowledgement. **Acknowledging means you have decided to put that
+content on every device attached to this vault.**
+
+### Git failures tell you the category, never the details
+
+Git's own error text routinely contains your remote URL, your username, or `remote:` lines
+from the server. Session Glue never forwards it. A Git failure is reported as exactly one
+named category:
+
+| Category | What it means |
+|---|---|
+| `git unavailable` | no usable `git` on `PATH` |
+| `not a Git working tree` | the path isn't a repository worktree |
+| `detached HEAD` | check out a branch in the clone |
+| `missing upstream` | the branch tracks nothing (or tracks a local branch) |
+| `uncommitted tracked changes` | commit or stash them in the clone first |
+| `authentication failed` | your existing git auth was refused |
+| `fetch failed` | the fetch did not complete |
+| `cannot fast-forward` | the clone diverged from its upstream; reconcile it yourself |
+| `non-fast-forward remote changes` | the remote moved; pull, then retry |
+| `push failed` | the push was refused |
+| `timed out` | 15s for local git commands, 60s for fetch and push |
+
+Session Glue never merges, rebases, or resets your own work to make a sync succeed. If the
+clone needs reconciling, it says so and stops.
+
+### What v1 deliberately does not do
+
+This is the whole list, and it is a design boundary rather than a roadmap:
+
+- **No provider APIs** — no Dropbox, Google Drive, or GitHub API calls. A folder is a
+  folder; a Git remote is your `git`.
+- **No OAuth, no tokens, no credentials.** Nothing is requested, read, parsed, or stored.
+  The Git transport inherits the authentication you already configured.
+- **No repository creation** and no automatic cloning. You create and clone the vault.
+- **No daemon, no watcher, no automatic sync.** Every sync is a command you type.
+- **No encryption.** A private Git repository is *access control*, not confidentiality —
+  anyone who can read the repo can read your handoffs.
+- **No collaboration.** A vault is for your own devices. There is no multi-user model, no
+  locking, and no server-side merge; folder operations are user-serialized, meaning you
+  are expected not to run two devices against the same vault at the same instant.
+- **One project ID per checkout.** A checkout is linked to one `--project-id`; naming a
+  different one fails before any write. There is no relink workflow and no second baseline.
+
 ## Built to be trusted
 
 Session Glue is deliberately boring in all the ways that matter for something you run inside your repositories:
@@ -148,7 +327,8 @@ Session Glue is deliberately boring in all the ways that matter for something yo
 |---|---|
 | **Zero runtime dependencies** | Pure Python standard library. `pip install` pulls in exactly one package: this one. Nothing else enters your supply chain. |
 | **No daemon, no watcher** | Nothing runs when you're not running it. Nothing to keep alive, patch, or forget about. |
-| **No network, ever** | The CLI makes no network calls — no telemetry, no cloud sync, no phoning home. Your session context never leaves your machine. |
+| **No network unless you ask** | The CLI makes no network calls on its own — no telemetry, no background sync, no phoning home, ever. The single exception is explicit: `glue sync … --vault-git-dir` runs *your* `git` against the remote *your* clone already points at, only when you type that command. A folder vault (`--vault-dir`) makes no network call at all, and every other command is entirely local. |
+| **No credentials, ever** | Nothing is requested, read, parsed, or stored — no OAuth, no tokens, no provider APIs, no `gh`. The Git vault transport inherits the authentication you already configured and never inspects it. A private repository is access control, not encryption. |
 | **No LLM calls** | The CLI is deterministic file mechanics. Your agent writes the summary; the CLI stores, indexes, and validates it. |
 | **Repo-local writes only** | Everything goes under `<repo>/.agent-history/` (plus the dedicated skill folder you explicitly ask for). Symlink and path-containment guards refuse writes that would escape the repository. |
 | **Never touches global config** | Skill installs copy files into a dedicated folder (`.claude/skills/…`, `.agents/skills/…`) — never into `CLAUDE.md`, `AGENTS.md`, or any global instruction file. Uninstall removes only the files it manages and refuses if anything unmanaged is present. |
@@ -178,7 +358,20 @@ glue skill list                  # supported agents + bundled skill state
 glue skill show claude           # target paths + the bundled SKILL.md
 glue skill install claude --scope repo|user [--dry-run] [--replace]
 glue skill uninstall claude --scope repo|user [--dry-run]
+
+# Personal Vault — opt-in, explicit, never automatic. Exactly one transport flag.
+glue sync push  --repo-root PATH --project-id ID (--vault-dir PATH | --vault-git-dir PATH) [--acknowledge PATH:SHA256:LABEL]
+glue sync pull  --repo-root PATH --project-id ID (--vault-dir PATH | --vault-git-dir PATH)
+glue sync resolve --repo-root PATH --project-id ID (--vault-dir PATH | --vault-git-dir PATH) \
+    --head-session ID [--archive SESSION_ID=local|vault] [--lifecycle SESSION_ID=local|vault] \
+    [--acknowledge PATH:SHA256:LABEL]
+glue sync migrate-roots --repo-root PATH --session-id ID --project-root PATH   # local-only; touches no vault
 ```
+
+Normal local commands never take a vault flag. Sync exits `3` for a conflict you must
+resolve and `4` for a vault that is not fully available — two different problems, so
+retrying the wrong one is not silently possible. `glue sync --help` states the v1 limits,
+the one-project-ID rule, and the full list of named Git failure categories.
 
 `session-glue` is available as a fallback executable, and `python -m session_glue` also works. The legacy `glue install <agent> --dry-run` (global instruction-file preview) is superseded by `glue skill install` and remains print-only.
 

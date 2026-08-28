@@ -380,6 +380,39 @@ EXIT_CONFLICT = 3
 EXIT_UNAVAILABLE = 4
 
 
+#: ``RawDescriptionHelpFormatter`` keeps these paragraphs intact, so they are
+#: hard-wrapped here rather than left to argparse. Everything stated is a claim
+#: about shipped behaviour; if one stops being true, this text is wrong, not
+#: merely stale.
+SYNC_DESCRIPTION = """\
+Explicitly synchronize .agent-history/ with a Personal Vault you supply on every
+invocation. Nothing here runs automatically, on a schedule, or as a side effect
+of another command, and no credential is ever requested, read, parsed, or stored.
+
+  --vault-dir       a plain folder. Makes no network call at all.
+  --vault-git-dir   an existing clone. Runs your own git against the remote the
+                    clone already has configured, with the authentication you
+                    already set up. Session Glue never invokes gh, creates a
+                    repository, or reads a token. Private Git is access control,
+                    not encryption.
+
+One project ID per checkout: naming a different ID than the one this checkout is
+linked to fails before any write. V1 has no relink workflow and no second
+baseline.
+
+If a folder vault reports "vault not fully available", your cloud sync client has
+not finished materializing it -- wait for it rather than retrying. On a device
+with no stored digest this is irreducible: an unmaterialized namespace and a
+genuinely new project look identical, so the command will not guess.
+
+Git failures are reported as one of these named categories, never as git's own
+output: git unavailable, not a Git working tree, detached HEAD, missing upstream,
+uncommitted tracked changes, authentication failed, fetch failed, cannot
+fast-forward, non-fast-forward remote changes, push failed, timed out. The remote
+URL, your environment, and handoff content never appear in an error message.
+"""
+
+
 def _add_vault_transport(parser: argparse.ArgumentParser) -> None:
     """Add the transport selector.
 
@@ -430,11 +463,8 @@ def _add_sync_commands(subparsers: argparse._SubParsersAction) -> None:
     sync = subparsers.add_parser(
         "sync",
         help="Explicit Personal Vault sync (opt-in; never automatic).",
-        description=(
-            "Explicitly synchronize .agent-history/ with a Personal Vault you "
-            "supply on every invocation. Nothing here runs automatically, "
-            "contacts a network, or handles a credential."
-        ),
+        description=SYNC_DESCRIPTION,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sync_sub = sync.add_subparsers(dest="sync_command", metavar="<subcommand>", required=True)
 
@@ -458,10 +488,26 @@ def _add_sync_commands(subparsers: argparse._SubParsersAction) -> None:
     _add_vault_transport(pull)
     pull.set_defaults(func=_cmd_sync_pull)
 
-    resolve = sync_sub.add_parser("resolve", help="Resolve conflicts with explicit selectors.")
+    resolve = sync_sub.add_parser(
+        "resolve",
+        help="Resolve conflicts with explicit selectors.",
+        description=(
+            "Resolve a conflicting sync by naming every choice explicitly. "
+            "Nothing is discarded: the side you do not select is retained in the "
+            "vault's conflicts/ area, so a resolution is always recoverable."
+        ),
+    )
     _add_common_sync_args(resolve)
     _add_vault_transport(resolve)
-    resolve.add_argument("--head-session", required=True, metavar="ID")
+    resolve.add_argument(
+        "--head-session",
+        required=True,
+        metavar="ID",
+        help=(
+            "Session that becomes the resume target after resolution. Required: "
+            "the command never picks a head for you."
+        ),
+    )
     resolve.add_argument(
         "--archive",
         action="append",
@@ -476,7 +522,16 @@ def _add_sync_commands(subparsers: argparse._SubParsersAction) -> None:
         metavar="SESSION_ID=local|vault",
         help="Choose which side of a lifecycle conflict wins. Repeatable.",
     )
-    resolve.add_argument("--acknowledge", action="append", default=[], metavar="PATH:SHA256:LABEL")
+    resolve.add_argument(
+        "--acknowledge",
+        action="append",
+        default=[],
+        metavar="PATH:SHA256:LABEL",
+        help=(
+            "Acknowledge one exact privacy finding, copied verbatim from the "
+            "blocking output. Deliberate, shared, and potentially unsafe."
+        ),
+    )
     resolve.set_defaults(func=_cmd_sync_resolve)
 
     migrate = sync_sub.add_parser(
@@ -488,9 +543,28 @@ def _add_sync_commands(subparsers: argparse._SubParsersAction) -> None:
             "ID and touches no vault."
         ),
     )
-    migrate.add_argument("--repo-root", default=".", metavar="PATH")
-    migrate.add_argument("--session-id", required=True, metavar="ID")
-    migrate.add_argument("--project-root", required=True, metavar="PATH")
+    migrate.add_argument(
+        "--repo-root",
+        default=".",
+        metavar="PATH",
+        help="Repository root that holds .agent-history/ (default: current directory).",
+    )
+    migrate.add_argument(
+        "--session-id",
+        required=True,
+        metavar="ID",
+        help="The archived session whose two root scalars are rewritten.",
+    )
+    migrate.add_argument(
+        "--project-root",
+        required=True,
+        metavar="PATH",
+        help=(
+            "New project_root. Must be the repo root or a directory inside it — "
+            "an archive whose project_root lies outside the repo root has no "
+            "device-independent form and is not exportable until this is fixed."
+        ),
+    )
     migrate.set_defaults(func=_cmd_sync_migrate_roots)
 
 

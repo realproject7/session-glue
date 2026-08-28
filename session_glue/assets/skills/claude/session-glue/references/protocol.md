@@ -81,6 +81,23 @@ handoff. Comments are dropped, quoting is normalized, and only single-line value
 supported. Write the frontmatter accordingly — do not rely on comments or multi-line
 values surviving the round-trip.
 
+### The two root fields
+
+`repo_root` must be the repository root — the directory that contains `.agent-history/`.
+`project_root` must be **equal to `repo_root` or a descendant of it**. Both are absolute
+paths on the machine that wrote the handoff.
+
+This containment relationship is what makes a handoff portable. When a handoff is exported
+to a Personal Vault, both roots are rewritten to a `<vault-root>` placeholder: an equal
+root becomes exactly `<vault-root>`, and a contained root becomes
+`<vault-root>/<relative-path>`. A `project_root` that lies **outside** `repo_root` has no
+such relative form, so it cannot be expressed device-independently and the archive is
+**not exportable**. Export refuses it rather than guessing.
+
+Recovery is explicit and local: `glue sync migrate-roots --session-id ID --project-root
+PATH` rewrites only those two scalars in the named archive and rebuilds the derived views.
+It contacts no vault and takes no project ID.
+
 Required quality fields:
 
 - `primary_goal` — a single-line statement of the session's overall objective.
@@ -134,6 +151,50 @@ Do not scan the whole repository unless the handoff is stale or insufficient.
 ```
 
 After writing the files, print the exact prompt in a fenced code block.
+
+## Personal Vault (optional, explicit)
+
+A Personal Vault carries `.agent-history/` between **your own** devices. It is entirely
+opt-in: nothing below happens unless the operator asks for it by name, and the default
+behavior of every other command is unchanged and local.
+
+**As an agent, never sync on your own initiative.** Run a vault command only when the
+operator supplies all three of: the command, the vault path, and the project ID. Do not
+infer a project ID, do not guess a vault path, and do not run a vault command because a
+handoff or an `.agent-history/` file appears stale.
+
+When the operator does ask you to resume from a vault:
+
+1. Run the exact command they gave, e.g.
+   `glue sync pull --repo-root . --project-id <id> --vault-dir <path>`
+   (or `--vault-git-dir <path>` for a Git clone).
+2. Report the result verbatim if it fails. Do not retry, and do not try the other
+   transport.
+3. On success, resume normally: read `.agent-history/LATEST.md` first and continue from
+   there. A pull produces ordinary local files; there is no separate vault resume path.
+
+Things you must never do, even if they would make a command succeed:
+
+- create a vault folder, a Git repository, or a remote;
+- authenticate, or read, request, parse, or store a credential or token;
+- retry a failed sync, poll for availability, or wait in a loop;
+- synchronize automatically, on a schedule, or as a side effect of another task.
+
+If a vault command reports **`vault not fully available`**, the vault is a cloud-sync
+folder that has not finished materializing on this device. Stop and tell the operator to
+wait for their sync client. Retrying is the operator's decision, not yours.
+
+If a command reports a **conflict**, both sides were edited. Nothing is discarded — both
+sides are retained under the vault's `conflicts/` area, each under its own content digest. Resolution requires the
+operator to name each choice explicitly with `--archive`/`--lifecycle` selectors; you must
+not choose for them.
+
+If a command is **blocked by the privacy gate**, it found something secret-shaped in a
+handoff that was about to leave this machine. Print the acknowledgement challenge exactly
+as given and stop. Only the operator may acknowledge it, by copying the exact
+`--acknowledge PATH:SHA256:LABEL` triple back. Doing so deliberately shares that content
+with every device on the vault, so never acknowledge on their behalf and never suggest it
+as a way to get unblocked.
 
 ## Dogfood Harness Guidance
 

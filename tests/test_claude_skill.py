@@ -54,3 +54,17 @@ def test_claude_skill_prefers_cli_and_links_fallback_protocol():
 def test_claude_skill_keeps_v1_constraints():
     assert "Do not request OS clipboard access" in SKILL
     assert "fenced" in SKILL and "code block" in SKILL
+
+
+def test_claude_skill_documents_explicit_vault_resume():
+    """Issue #81: the packaged Claude asset must carry the same rule as Codex.
+
+    The protocol byte-identity guard covers ``references/protocol.md`` only; the
+    two ``SKILL.md`` files legitimately differ (the Claude invocation note), so
+    this content is asserted separately rather than by comparison.
+    """
+    assert "The default is local. Never sync on your own initiative." in SKILL
+    assert "glue sync pull --repo-root . --project-id <id> --vault-dir <path>" in SKILL
+    assert "glue sync pull --repo-root . --project-id <id> --vault-git-dir <path>" in SKILL
+    assert "do not authenticate or handle a" in SKILL
+    assert "vault not fully available" in SKILL

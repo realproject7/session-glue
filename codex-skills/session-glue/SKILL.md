@@ -48,3 +48,26 @@ handoff you did not write without reviewing them first.
 
 Use `glue status --repo-root .` for a compact orientation and
 `glue resume-prompt --repo-root .` to print the canonical prompt exactly.
+
+## Personal Vault (only when the operator asks)
+
+Session Glue can carry `.agent-history/` between the operator's own devices through an
+opt-in Personal Vault. **The default is local. Never sync on your own initiative.**
+
+Run a vault command only when the operator supplies the command, the vault path, and the
+project ID:
+
+```bash
+glue sync pull --repo-root . --project-id <id> --vault-dir <path>
+glue sync pull --repo-root . --project-id <id> --vault-git-dir <path>
+```
+
+Then validate and resume normally — a pull produces ordinary local files, so
+`.agent-history/LATEST.md` is still the first thing you read.
+
+Do not create a vault folder, repository, or remote; do not authenticate or handle a
+token; do not retry a failure, poll, or sync automatically. If a command reports
+`vault not fully available`, tell the operator to wait for their sync client instead of
+retrying. If it reports a conflict or a privacy block, report it verbatim and stop — only
+the operator resolves conflicts or acknowledges a privacy finding. See
+`references/protocol.md`.

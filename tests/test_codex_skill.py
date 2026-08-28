@@ -66,3 +66,52 @@ def test_openai_yaml_mentions_skill_name_in_default_prompt():
     assert 'display_name: "Session Glue"' in OPENAI_YAML
     assert "default_prompt:" in OPENAI_YAML
     assert "$session-glue" in OPENAI_YAML
+
+
+# --------------------------------------------------------------------------- #
+# Personal Vault documentation (issue #81)
+# --------------------------------------------------------------------------- #
+
+
+def test_protocol_defines_the_contained_root_relationship():
+    """#77's export contract depends on this containment, so the protocol states it."""
+    assert "`project_root` must be **equal to `repo_root` or a descendant of it**" in PROTOCOL
+    assert "<vault-root>" in PROTOCOL
+    assert "not exportable" in PROTOCOL
+    assert "glue sync migrate-roots" in PROTOCOL
+
+
+def test_protocol_makes_vault_sync_operator_initiated_only():
+    assert "never sync on your own initiative" in PROTOCOL.lower()
+    # All three must be supplied by the operator; none may be inferred.
+    assert "the command, the vault path, and the project ID" in PROTOCOL
+    assert "Do not\ninfer a project ID" in PROTOCOL
+
+
+def test_protocol_forbids_credentials_creation_and_retry():
+    for forbidden in (
+        "create a vault folder, a Git repository, or a remote",
+        "authenticate, or read, request, parse, or store a credential",
+        "retry a failed sync, poll for availability, or wait in a loop",
+        "synchronize automatically, on a schedule, or as a side effect",
+    ):
+        assert forbidden in PROTOCOL, f"protocol no longer forbids: {forbidden!r}"
+
+
+def test_protocol_states_the_operator_owns_unavailability_conflicts_and_privacy():
+    # Unavailability is a wait, not a retry.
+    assert "vault not fully available" in PROTOCOL
+    assert "wait for their sync client" in PROTOCOL
+    # Conflicts retain data and are the operator's decision.
+    assert "Nothing is discarded" in PROTOCOL
+    assert "both\nsides are retained under the vault's `conflicts/` area" in PROTOCOL
+    assert "you must\nnot choose for them" in PROTOCOL
+    # A privacy override is deliberate and never the agent's to make.
+    assert "never acknowledge on their behalf" in PROTOCOL
+
+
+def test_skill_documents_explicit_vault_resume():
+    assert "The default is local. Never sync on your own initiative." in SKILL
+    assert "glue sync pull --repo-root . --project-id <id> --vault-dir <path>" in SKILL
+    assert "glue sync pull --repo-root . --project-id <id> --vault-git-dir <path>" in SKILL
+    assert "do not retry a failure, poll, or sync automatically" in SKILL

@@ -9,7 +9,60 @@ Releases are built and published from CI going forward.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Personal Vault — opt-in sync of `.agent-history/` between your own devices.** New
+  `glue sync push|pull|resolve` commands take `--repo-root PATH --project-id ID` and
+  exactly one transport: `--vault-dir PATH` (a plain folder your own cloud-sync client
+  keeps in step) or `--vault-git-dir PATH` (a private Git repository you have already
+  cloned). Every sync is a command you type; nothing runs automatically, on a schedule, or
+  as a side effect of another command, and normal local commands take no vault flags.
+- Handoffs are made device-independent on export: `repo_root` and `project_root` are
+  rewritten to a `<vault-root>` placeholder, which requires `project_root` to be the repo
+  root or a directory inside it. New local-only `glue sync migrate-roots --session-id ID
+  --project-root PATH` repairs an archive whose roots fall outside the repository; it
+  contacts no vault and takes no project ID.
+- Conflicts are surfaced, never guessed. When both sides changed the same session,
+  `glue sync` stops with exit code `3` and `glue sync resolve` requires an explicit
+  `--head-session` plus `--archive`/`--lifecycle` selectors for every named conflict. The
+  **both** sides are retained under the vault's `conflicts/archives/<session-id>/` rather
+  than either being discarded. Sessions that exist on only one device are preserved rather than treated as
+  deletions.
+- A privacy gate runs before anything leaves the machine. A secret-shaped finding blocks
+  the sync and prints an acknowledgement challenge bound to the exact
+  `(path, sha256, label)` triple, without ever echoing the matched text. Overriding it is
+  deliberate: acknowledging shares that content with every device on the vault.
+- Incomplete vaults are refused with exit code `4` (`vault not fully available`) instead of
+  being read half-written. Session Glue never retries, polls, or waits — the operator
+  re-runs the command once their sync client has settled. Documented caveat: on a device
+  with no stored digest for a project, an unmaterialized namespace and a genuinely new
+  project are indistinguishable.
+- The Git transport fetches and fast-forwards, then produces exactly one commit per
+  vault-mutating operation and pushes it to the branch's own upstream. The local record of
+  vault state advances only after that push succeeds. Failures are reported as named,
+  redacted categories (git unavailable, not a Git working tree, detached HEAD, missing
+  upstream, uncommitted tracked changes, authentication failed, fetch failed, cannot
+  fast-forward, non-fast-forward remote changes, push failed, timed out) — git's own
+  output, your remote URL, your environment, and handoff content never appear in an error.
+  Session Glue never merges, rebases, or resets your work to make a sync succeed.
+- The bundled Codex and Claude skills teach the explicit-resume rule: an agent runs a vault
+  command only when the operator supplies the command, the path, and the project ID, and
+  never creates a vault, authenticates, retries, or synchronizes on its own initiative.
+
+### Changed
+
+- README and `glue sync --help` now state the v1 limits directly: no provider APIs (Dropbox,
+  Google Drive, GitHub), no OAuth, no token storage, no credential request/read/parse, no
+  automatic repository creation, no daemon, no automatic sync, no encryption, and no
+  collaboration. A private Git repository is **access control, not confidentiality**, and
+  folder operations are user-serialized rather than locked.
+- README's trust posture is corrected rather than merely extended. "No network, ever" was
+  true before the Git transport and is not any more: the CLI still makes no network call on
+  its own, and the one exception — `--vault-git-dir` running your own `git` against your own
+  configured remote — is now stated as such. A companion row records that no credential is
+  ever requested, read, parsed, or stored.
+- One `--project-id` per checkout is enforced before any write, and both README and CLI
+  help say so: there is no relink workflow and no second baseline in v1.
 
 ## [0.3.1] - 2026-07-10
 
