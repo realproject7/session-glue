@@ -1044,6 +1044,13 @@ def migrate_roots(repo_root: Path | str, session_id: str, project_root: Path | s
     root = Path(repo_root)
     history_dir = root / writer.AGENT_HISTORY_DIRNAME
     archives = read_local_archives(root)
+    # Before the target is chosen, before the rewrite, before anything is staged
+    # and before the derived rebuild. `migrate_roots` is the fourth writer of
+    # `rebuild_derived` and the one #115 missed: with two archives claiming one
+    # session id, `next(...)` below picks by filename order and the rebuilt
+    # LATEST.md / INDEX.yaml / RESUME_PROMPT.txt follow whichever sorted first
+    # (#121). The guard is #115's, not a second implementation of it.
+    reject_duplicate_session_ids(archives, "local")
     target = next(
         (
             relative_path
