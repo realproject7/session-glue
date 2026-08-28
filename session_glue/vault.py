@@ -1340,14 +1340,19 @@ class RestoreOutcome:
     Three lists rather than one because the causes are different and each needs
     its own diagnosis:
 
-    - ``collisions`` — something *else* now occupies the target, so it is not
-      ours to replace.
+    - ``collisions`` — the target is occupied by something that is **not ours**,
+      so it is not ours to replace.
     - ``unrestorable`` — the quarantined copy is no longer there to restore.
-    - ``failed`` — the restoration operation itself failed, with nothing
-      occupying the path. That covers **both** ways this path restores: writing
-      the pre-command bytes back, and removing a file this invocation created
-      whose snapshot says it was absent before. Naming only the write would be
-      accurate for one of them and wrong for the other.
+    - ``failed`` — a restoration operation was attempted and raised. That covers
+      both ways this path restores: writing the pre-command bytes back, and
+      removing a file this invocation created whose snapshot says it was absent
+      before.
+
+    **Ownership is the discriminator, not occupancy.** A ``failed`` entry can
+    perfectly well have a file at the target — the failed-removal case does,
+    because the file is the one this invocation created. Saying ``failed`` means
+    "nothing occupies the path" was contradicted by the very test written to
+    cover it.
 
     Collapsing any two prints a diagnosis that is not true: folding ``failed``
     into ``collisions`` reported *"something else occupies the path"* for a path

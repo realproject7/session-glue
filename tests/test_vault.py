@@ -3247,3 +3247,31 @@ def test_a_failed_removal_is_reported_in_the_same_bucket(checkout, monkeypatch):
 
     assert failed == [absent], "the failed removal was not reported"
     assert collisions == []
+
+
+def test_failed_does_not_imply_an_empty_target(checkout, monkeypatch):
+    """RE1: `failed` said "nothing occupying the path", which its own case disproves.
+
+    Ownership is the discriminator, not occupancy — a failed restoration can
+    have a file sitting at the target, because that file is the one this
+    invocation created. Pinned so the description cannot drift back.
+    """
+    import pathlib
+
+    history = checkout / writer.AGENT_HISTORY_DIRNAME
+    name = "RESUME_PROMPT.txt"
+    (history / name).unlink(missing_ok=True)
+    snapshot = vault.snapshot_local_artifacts(checkout)
+    created = "created by this operation\n"
+    (history / name).write_text(created, encoding="utf-8")
+    monkeypatch.setattr(
+        pathlib.Path, "unlink",
+        lambda self, *a, **k: (_ for _ in ()).throw(OSError("injected")),
+    )
+
+    collisions, failed = vault.restore_local_artifacts(checkout, snapshot, {name: created})
+
+    assert failed == [name]
+    # The defining point: the target is occupied, and it is still not a collision.
+    assert (history / name).exists()
+    assert collisions == []
