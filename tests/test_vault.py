@@ -2688,3 +2688,66 @@ def test_folder_export_still_reads_a_namespace_local_decision_log(tmp_path, chec
     assert "folder-local" in (namespace / vault.DECISIONS_FILENAME).read_text(
         encoding="utf-8"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #115 — the duplicate refusal lives in the core, so folder mode gets it
+# --------------------------------------------------------------------------- #
+
+
+def _local_duplicate_archive(root, name):
+    """A second local archive claiming the existing session id, via the writer."""
+    frontmatter = _frontmatter(str(root), None)
+    handoff = schema.Handoff.from_frontmatter(frontmatter, BODY)
+    writer.create_handoff(
+        repo_root=root, frontmatter=frontmatter, body=BODY, handoff=handoff,
+        archive_name=name,
+    )
+
+
+def test_reject_duplicate_session_ids_accepts_a_unique_set():
+    """Declared control: the check keys on the id, never on the filename."""
+    archives = {
+        "sessions/a.md": "---\nsession_id: one\n---\n",
+        "sessions/named-by-hand.md": "---\nsession_id: two\n---\n",
+    }
+
+    assert vault.reject_duplicate_session_ids(archives, "local") is None
+
+
+def test_reject_duplicate_session_ids_ignores_archives_without_an_id():
+    """Unparseable or id-less archives are not duplicates of each other.
+
+    Grouping them would turn two unrelated malformed files into a refusal that
+    names no real session, which is the opposite of actionable.
+    """
+    archives = {"sessions/a.md": "not an archive", "sessions/b.md": "also not one"}
+
+    assert vault.reject_duplicate_session_ids(archives, "vault") is None
+
+
+def test_folder_mode_refuses_a_duplicate_on_export(tmp_path, checkout):
+    """AC3: folder-mode duplicates.
+
+    The check sits in the core rather than a transport precisely so this holds —
+    folder mode has no admission concept at all, yet reaches the same
+    `rebuild_derived` first-match selection.
+    """
+    _local_duplicate_archive(checkout, "000-earlier")
+
+    with pytest.raises(vault.VaultError, match="duplicate session id"):
+        vault.export_project(checkout, tmp_path / "vault", "alpha")
+
+
+def test_folder_mode_refuses_a_duplicate_on_import(tmp_path, checkout):
+    """AC3: the same refusal on the import side of the folder transport."""
+    vault_root = tmp_path / "vault"
+    vault.export_project(checkout, vault_root, "alpha")
+    namespace = vault.project_dir(vault_root, "alpha")
+    real = next((namespace / vault.SESSIONS_DIRNAME).glob("*.md"))
+    (namespace / vault.SESSIONS_DIRNAME / "000-duplicate.md").write_text(
+        real.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    with pytest.raises(vault.VaultError, match="duplicate session id"):
+        vault.import_project(tmp_path / "fresh", vault_root, "alpha")
