@@ -52,14 +52,34 @@ FLAT_README = _flat(README)
 # --------------------------------------------------------------------------- #
 
 
+def _shipped_sync_subcommands() -> list[str]:
+    """Every `glue sync` subcommand the parser actually registers."""
+    parser = cli.build_parser()
+    for action in parser._actions:
+        for name, sub in getattr(action, "_name_parser_map", {}).items():
+            if name != "sync":
+                continue
+            for inner in sub._actions:
+                names = getattr(inner, "_name_parser_map", {})
+                if names:
+                    return sorted(names)
+    raise AssertionError("no `glue sync` subparsers found")
+
+
 def test_readme_documents_both_transports_and_every_sync_subcommand():
-    for command in (
-        "glue sync push",
-        "glue sync pull",
-        "glue sync resolve",
-        "glue sync migrate-roots",
-    ):
-        assert command in README, f"README never shows {command!r}"
+    """Named for *every* subcommand, and now enumerating them from the parser.
+
+    This passed for the whole of #128's lifetime while the README omitted
+    `glue sync recover-duplicates`. The list was typed by hand, so it asserted
+    the four commands someone remembered rather than the ones the CLI ships —
+    and a hand-maintained coverage guard goes stale at exactly the moment it
+    exists to catch, the addition of a command. Deriving it from the parser is
+    what makes the test's own name true.
+    """
+    shipped = _shipped_sync_subcommands()
+    assert "recover-duplicates" in shipped, "fixture: the parser must register it"
+    for name in shipped:
+        assert f"glue sync {name}" in README, f"README never shows 'glue sync {name}'"
     assert "--vault-dir" in README and "--vault-git-dir" in README
 
 

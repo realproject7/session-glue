@@ -365,13 +365,34 @@ glue sync pull  --repo-root PATH --project-id ID (--vault-dir PATH | --vault-git
 glue sync resolve --repo-root PATH --project-id ID (--vault-dir PATH | --vault-git-dir PATH) \
     --head-session ID [--archive SESSION_ID=local|vault] [--lifecycle SESSION_ID=local|vault] \
     [--acknowledge PATH:SHA256:LABEL]
+glue sync recover-duplicates --repo-root PATH --project-id ID (--vault-dir PATH | --vault-git-dir PATH) [--apply]
 glue sync migrate-roots --repo-root PATH --session-id ID --project-root PATH   # local-only; touches no vault
 ```
 
+Two local archives claiming one `session_id` make every other vault operation refuse,
+because the derived head would otherwise depend on filename order. `glue sync
+recover-duplicates` is the way out, and it needs a vault: the authoritative copy comes
+from there, so one transport flag is required exactly as for `push` and `pull`.
+
+It **lists and changes nothing by default** — you see every duplicated id and each path
+claiming it, and nothing moves until you re-run with `--apply`. With `--apply`, the
+conflicting copies are *moved* into a timestamped `.agent-history/quarantine-<stamp>/`,
+never deleted, and the authoritative set is then re-materialized from the vault. An
+archive whose `session_id` is unique keeps its content untouched. If anything fails after
+that move, the quarantined copies are put back and your history returns to its
+pre-command bytes; whatever could not be returned is named in the error, and the
+quarantine is kept so nothing is stranded.
+
 Normal local commands never take a vault flag. Sync exits `3` for a conflict you must
 resolve and `4` for a vault that is not fully available — two different problems, so
-retrying the wrong one is not silently possible. `glue sync --help` states the v1 limits,
-the one-project-ID rule, and the full list of named Git failure categories.
+retrying the wrong one is not silently possible. That distinction covers what a command
+detects **before it changes anything**; `recover-duplicates` also has an after, and once
+it has moved archives into the quarantine every failure is reported as exit `1`, carrying
+the original cause plus the rollback's own account of what went back and what did not. So
+a vault that goes missing mid-recovery exits `1`, not `4`. Exit `1` is the general failure
+code and is not specific to that phase — read the message, not the number, to tell a
+pre-move refusal from a rolled-back one. `glue sync --help` states the v1 limits, the one-project-ID rule, and the
+full list of named Git failure categories.
 
 `session-glue` is available as a fallback executable, and `python -m session_glue` also works. The legacy `glue install <agent> --dry-run` (global instruction-file preview) is superseded by `glue skill install` and remains print-only.
 
