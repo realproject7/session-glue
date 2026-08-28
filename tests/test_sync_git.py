@@ -8,6 +8,7 @@ proven by the harness rather than asserted in prose.
 from __future__ import annotations
 
 import os
+import pathlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -2634,3 +2635,66 @@ def test_an_unreadable_artifact_refuses_before_any_move(
     assert "nothing was moved" in output.err
     assert list((checkout / ".agent-history").glob("quarantine-*")) == []
     assert _history_bytes(checkout) == before
+
+
+@pytest.mark.parametrize("transport", ["folder", "git"])
+def test_a_cleanup_failure_is_actionable_and_stops_nothing(
+    tmp_path, checkout, clone, monkeypatch, capsys, transport
+):
+    """#127 AC1/AC2/AC4: the emptied-quarantine `rmdir` is cleanup, not restoration.
+
+    `rmdir` runs last in `restore_quarantined`, after every archive is already
+    back — so failing it here is failing *only* the cleanup. It used to escape:
+    the operator got a raw traceback instead of the handled recovery error, and
+    the artifact and sync-state restoration at the next line never ran, leaving
+    derived local state changed by a transaction that had failed.
+
+    Asserted as whole-history byte identity rather than by naming the artifacts
+    that used to differ. #126 shrank that set from `INDEX.yaml` + `VAULT-SYNC.yaml`
+    to `INDEX.yaml` alone, and a control that enumerates files rots into a false
+    failure the next time the set changes (RE2, on this ticket).
+    """
+    flag, target = _vault_with_a_unique_archive(tmp_path, transport, clone)
+    _duplicate_archive(checkout, "000-earlier")
+    before = _history_bytes(checkout)
+    real_write = vault.write_sync_state
+
+    def mutate_then_raise(*args, **kwargs):
+        real_write(*args, **kwargs)
+        raise vault.VaultError("injected primary failure")
+
+    real_rmdir = pathlib.Path.rmdir
+
+    def rmdir_only_the_quarantine(self, *a, **k):
+        # Scoped to the quarantine so this fails *after* archive restoration and
+        # nowhere else: any other rmdir in the run behaves normally.
+        if self.name.startswith("quarantine-"):
+            raise OSError(13, "Permission denied")
+        return real_rmdir(self, *a, **k)
+
+    monkeypatch.setattr(vault, "write_sync_state", mutate_then_raise)
+    monkeypatch.setattr(pathlib.Path, "rmdir", rmdir_only_the_quarantine)
+    capsys.readouterr()
+
+    rc = _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", flag, str(target), "--apply",
+    )
+    err = capsys.readouterr().err
+
+    assert rc == cli.EXIT_ERROR, "the cleanup failure escaped as a traceback"
+    assert "injected primary failure" in err, "the original failure was replaced"
+    assert "could not be removed" in err, "the cleanup failure was not reported"
+    assert "does not affect what was restored" in err, (
+        "a retained empty quarantine was reported as an inexact restoration"
+    )
+    assert "could not restore" not in err, (
+        "cleanup was folded into the restore-failure categories"
+    )
+
+    quarantines = list((checkout / ".agent-history").glob("quarantine-*"))
+    assert len(quarantines) == 1, "the empty quarantine should remain for the operator"
+    assert list(quarantines[0].iterdir()) == [], "nothing should be left inside it"
+    assert _history_bytes(checkout) == before, (
+        "the cleanup failure skipped the remaining restoration"
+    )
