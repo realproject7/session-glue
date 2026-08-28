@@ -1337,11 +1337,22 @@ def free_quarantine_dir(repo_root: Path | str, stamp: str) -> Path:
 class RestoreOutcome:
     """What a rollback could not put back, and why (#124).
 
-    Two lists rather than one because the causes are different and the operator
-    needs both: ``collisions`` are paths where something *else* now occupies the
-    target, ``unrestorable`` are paths whose quarantined copy is no longer there
-    to restore. Neither is a silent skip — both are reported, and either means
-    the result is not an exact restoration.
+    Three lists rather than one because the causes are different and each needs
+    its own diagnosis:
+
+    - ``collisions`` — something *else* now occupies the target, so it is not
+      ours to replace.
+    - ``unrestorable`` — the quarantined copy is no longer there to restore.
+    - ``failed`` — the restore write itself failed, with nothing occupying the
+      path.
+
+    Collapsing any two prints a diagnosis that is not true: folding ``failed``
+    into ``collisions`` reported *"something else occupies the path"* for a path
+    nothing occupied, which is the mistake this split exists to prevent and
+    which I made anyway one field later.
+
+    None is a silent skip — every one is reported, and any of them means the
+    result is not an exact restoration.
     """
 
     collisions: list[str]
