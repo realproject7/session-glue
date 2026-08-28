@@ -11,6 +11,8 @@ from __future__ import annotations
 import pathlib
 import shutil
 
+import os
+
 import pytest
 
 from session_glue import schema, validator, vault, writer
@@ -2574,6 +2576,10 @@ def test_an_unadmitted_file_is_never_read(tmp_path):
     assert vault.read_vault_archives(namespace, {"sessions/a.md"}) == {"sessions/a.md": "A"}
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="chmod(0) does not deny reads on Windows; the precondition is unexpressible",
+)
 def test_an_admitted_unreadable_archive_is_still_a_torn_vault(tmp_path):
     """The narrowing must not swallow the signal it was never meant to touch.
 

@@ -7,6 +7,7 @@ proven by the harness rather than asserted in prose.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -1508,20 +1509,24 @@ def test_an_untracked_unusable_archive_does_not_change_a_pull(
         "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
         "--vault-git-dir", str(clone),
     ) == 0
-    control = tmp_path / f"control-{name}"
-    control.mkdir()
-    assert _pull(control, clone) == 0
-    # Root scalars are rewritten to the importing checkout, so the two pulls
-    # differ by their own paths and nothing else; normalise those away or the
-    # comparison fails for a reason that has nothing to do with #112.
-    def _tree(root: Path) -> dict[str, str]:
+    dest = tmp_path / f"dest-{name}"
+    dest.mkdir()
+
+    def _tree() -> dict[str, str]:
         return {
-            p.name: p.read_text(encoding="utf-8").replace(str(root), "<ROOT>")
-            for p in sorted((root / ".agent-history").rglob("*"))
+            str(p.relative_to(dest)): p.read_text(encoding="utf-8")
+            for p in sorted((dest / ".agent-history").rglob("*"))
             if p.is_file()
         }
 
-    expected = _tree(control)
+    # The control runs into the *same* checkout, then the history is removed so
+    # the second pull starts fresh again. Two different directories would by
+    # their own root scalars, and normalising those away means matching however
+    # the serializer chose to quote and escape a native path — which is exactly
+    # the Windows-only mismatch #106 already cost a round to.
+    assert _pull(dest, clone) == 0
+    expected = _tree()
+    shutil.rmtree(dest / ".agent-history")
 
     real = next((clone / "projects" / "alpha" / "sessions").glob("*.md")).read_text(
         encoding="utf-8"
@@ -1529,12 +1534,10 @@ def test_an_untracked_unusable_archive_does_not_change_a_pull(
     (clone / "projects" / "alpha" / "sessions" / "zzz-unusable.md").write_bytes(
         make_bytes(real)
     )
-    dest = tmp_path / f"dest-{name}"
-    dest.mkdir()
 
     assert _pull(dest, clone) == 0
 
-    assert _tree(dest) == expected
+    assert _tree() == expected
 
 
 def test_an_untracked_undecodable_archive_does_not_break_push_or_resolve(
