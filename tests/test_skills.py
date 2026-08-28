@@ -309,3 +309,150 @@ def test_skill_requires_a_subcommand():
     with pytest.raises(SystemExit) as exc_info:
         main(["skill"])
     assert exc_info.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# Issue #92 — a symlinked scope *ancestor*, not just the final target
+# --------------------------------------------------------------------------- #
+
+
+def _symlinked_ancestor(root: Path, outside: Path, agent: str) -> Path:
+    """Redirect the target's parent directory out of the scope root.
+
+    The distinction from `_symlinked_target` is the whole ticket: that one
+    replaces the leaf, which `_reject_symlink` catches. This replaces a
+    *directory above* it, which the leaf check cannot see — `target.is_symlink()`
+    is false while every path through it lands outside.
+    """
+    ancestor = root / _SUBPATH[agent].parent
+    ancestor.parent.mkdir(parents=True, exist_ok=True)
+    ancestor.symlink_to(outside, target_is_directory=True)
+    return ancestor
+
+
+def _plant_managed_files(outside: Path, agent: str) -> dict[str, bytes]:
+    """A previous install's worth of files, sitting outside the scope root."""
+    installed = outside / _SUBPATH[agent].name
+    installed.mkdir()
+    written = {}
+    for rel in _MANAGED[agent]:
+        dest = installed / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(_bundle_bytes(agent, rel))
+        written[rel] = dest.read_bytes()
+    return written
+
+
+def _tree(path: Path) -> dict[str, bytes | None]:
+    return {
+        str(p.relative_to(path)): (p.read_bytes() if p.is_file() else None)
+        for p in path.rglob("*")
+    }
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+def test_install_rejects_a_symlinked_ancestor_before_creating_anything(
+    tmp_path, agent, capsys
+):
+    """AC1: `mkdir(parents=True)` used to run first and create a directory outside.
+
+    Asserted as *the external tree is unchanged*, not as a non-zero exit: the old
+    code also exited 1 — the containment check ran, just after the damage — so an
+    exit-code assertion alone passes on the broken ordering.
+    """
+    repo = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    repo.mkdir()
+    outside.mkdir()
+    _symlinked_ancestor(repo, outside, agent)
+    before = _tree(outside)
+
+    assert _install(repo, agent) == 1
+
+    assert _tree(outside) == before
+    assert "refusing to write outside" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+def test_install_replace_through_a_symlinked_ancestor_deletes_nothing(
+    tmp_path, agent, capsys
+):
+    """AC1: the sharpest case — `--replace` unlinked the operator's files outside.
+
+    The external directory is populated with exactly the managed set so
+    `_unmanaged_extras` does not refuse first; the plan therefore succeeds and
+    `apply_install` reaches its removal loop, which is the code under test.
+    """
+    repo = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    repo.mkdir()
+    outside.mkdir()
+    _symlinked_ancestor(repo, outside, agent)
+    planted = _plant_managed_files(outside, agent)
+    before = _tree(outside)
+
+    assert _install(repo, agent, "--replace") == 1
+
+    assert _tree(outside) == before
+    installed = outside / _SUBPATH[agent].name
+    for rel, data in planted.items():
+        assert (installed / rel).read_bytes() == data
+    assert "refusing to write outside" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+def test_install_user_scope_rejects_a_symlinked_ancestor(tmp_path, agent, monkeypatch):
+    """AC1: home scope, which resolves its root from the environment rather than a flag."""
+    home = tmp_path / "home"
+    outside = tmp_path / "outside"
+    home.mkdir()
+    outside.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    _symlinked_ancestor(home, outside, agent)
+    before = _tree(outside)
+
+    assert main(["skill", "install", agent, "--scope", "user"]) == 1
+
+    assert _tree(outside) == before
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+def test_uninstall_rejects_a_symlinked_ancestor_before_removing_anything(
+    tmp_path, agent
+):
+    """AC2: a regression guard for ordering `apply_uninstall` already had right.
+
+    This one passes before the fix as well as after — that is the point. It pins
+    the behaviour `apply_install` was changed to match, so a future edit cannot
+    quietly reintroduce the divergence in the other direction.
+    """
+    repo = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    repo.mkdir()
+    outside.mkdir()
+    _symlinked_ancestor(repo, outside, agent)
+    _plant_managed_files(outside, agent)
+    before = _tree(outside)
+
+    assert _uninstall(repo, agent) == 1
+
+    assert _tree(outside) == before
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+def test_uninstall_user_scope_rejects_a_symlinked_ancestor(tmp_path, agent, monkeypatch):
+    """AC1/AC2: the home-scope half of the same regression guard."""
+    home = tmp_path / "home"
+    outside = tmp_path / "outside"
+    home.mkdir()
+    outside.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    _symlinked_ancestor(home, outside, agent)
+    _plant_managed_files(outside, agent)
+    before = _tree(outside)
+
+    assert main(["skill", "uninstall", agent, "--scope", "user"]) == 1
+
+    assert _tree(outside) == before
