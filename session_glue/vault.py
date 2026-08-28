@@ -40,6 +40,11 @@ VAULT_ROOT_TOKEN = "<vault-root>"
 
 PROJECTS_DIRNAME = "projects"
 MARKER_FILENAME = "vault-project.yaml"
+
+#: Suffix for the sibling a publication write stages into before replacing its
+#: target. Inside the same directory so the replace is same-filesystem, and
+#: therefore atomic.
+STAGING_SUFFIX = ".partial"
 SESSIONS_DIRNAME = "sessions"
 DECISIONS_FILENAME = "DECISIONS.md"
 STATE_DIRNAME = "state"
@@ -644,22 +649,29 @@ class Creations:
     #87's contract is asymmetric on purpose: a rollback removes what the
     operation *created* and never touches anything that was already there, so an
     operator file sitting inside the transport namespace survives a failed sync.
-    Restoring the bytes of a *replaced* file is a different guarantee and belongs
-    to #93.
+    #93 adds the other half — the bytes of a *replaced* file — which is a
+    restoration of what was already there rather than a removal, so the
+    asymmetry still holds: nothing this undoes was absent before the operation.
     """
 
     def __init__(self) -> None:
         self.files: list[Path] = []
         self.dirs: list[Path] = []
+        self.replaced: list[tuple[Path, bytes]] = []
 
     def undo(self) -> None:
-        """Delete created files, then prune the directories they needed.
+        """Restore displaced bytes, delete created files, then prune their dirs.
 
         Directories matter beyond tidiness: an empty ``projects/<id>/sessions/``
         left behind makes :func:`_namespace_is_empty` report a populated
         namespace, so a failed first sync would be read as an unavailable vault
         on every later attempt.
+
+        Restores run first and in reverse: a target replaced twice in one
+        publication is returned to the bytes it held before the *first* write.
         """
+        for target, original in reversed(self.replaced):
+            Path(target).write_bytes(original)
         for target in reversed(self.files):
             Path(target).unlink(missing_ok=True)
         for directory in reversed(self.dirs):
@@ -1087,12 +1099,12 @@ def _publish(
     so a symlinked namespace or nested parent cannot redirect a write out of the
     vault root.
 
-    ``created`` records every path this call brings into existence but never
-    undoes anything itself: the caller decides. #87 gives that decision to the
-    Git transport, which needs it because a ``git reset --hard`` restores tracked
-    bytes and cannot remove a file that was never committed. Folder-mode recovery
-    on a failed publication is #93's, so a folder caller that passes no record
-    keeps today's behaviour exactly.
+    ``created`` decides who owns recovery. When a caller passes one it also owns
+    the rollback: #87 gives that to the Git transport, which has to sequence it
+    against a ``git reset --hard`` that restores tracked bytes but cannot remove
+    a file that was never committed. When no record is passed — folder mode —
+    there is no outer transport to recover, so this rolls back itself (#93):
+    displaced bytes restored, created targets removed.
     """
     root = Path(vault_root)
     path = Path(namespace)
@@ -1103,23 +1115,51 @@ def _publish(
         guard_contained_path(root, target)
 
     record = Creations() if created is None else created
-    written = 0
-    for relative_path in sorted(content):
-        if fault_after is not None and written == fault_after:
-            raise VaultError("injected publication fault")
-        target = path / relative_path
-        _write_recorded(root, target, content[relative_path], record)
-        written += 1
-    _write_recorded(root, state_path(path), render_vault_state(state), record)
-    _write_recorded(root, path / MARKER_FILENAME, render_marker(project_id), record)
+    try:
+        written = 0
+        for relative_path in sorted(content):
+            if fault_after is not None and written == fault_after:
+                raise VaultError("injected publication fault")
+            target = path / relative_path
+            _write_recorded(root, target, content[relative_path], record)
+            written += 1
+        _write_recorded(root, state_path(path), render_vault_state(state), record)
+        _write_recorded(root, path / MARKER_FILENAME, render_marker(project_id), record)
+    except Exception:
+        if created is None:
+            record.undo()
+        raise
 
 
 def _write_recorded(root: Path, target: Path, text: str, record: "Creations") -> None:
-    """Write one publication target, noting it if it did not exist before."""
+    """Write one publication target atomically, recording what it displaced.
+
+    #82 found this overwriting in place: a write that failed after truncating an
+    existing archive left partial bytes behind, and because a body-only
+    truncation keeps parseable frontmatter, the referenced-archive check could
+    not see it. Staging into a sibling and replacing means the vault never holds
+    a half-written file — a failure leaves either the old bytes or the new ones
+    (#93).
+    """
     _prepare_target(root, target, record.dirs)
-    if not target.exists():
+    existed = target.is_file()
+    if existed:
+        # Captured before the replace, so a rollback can put back exactly what
+        # this call displaced rather than whatever a later step left.
+        record.replaced.append((target, target.read_bytes()))
+    else:
         record.files.append(target)
-    target.write_text(text, encoding="utf-8", newline="\n")
+
+    staged = target.with_name(target.name + STAGING_SUFFIX)
+    guard_contained_path(root, staged)
+    try:
+        staged.write_text(text, encoding="utf-8", newline="\n")
+        os.replace(staged, target)
+    except Exception:
+        # A half-written sibling is still a file the vault did not have before,
+        # and AC1 asks for the exact pre-operation *file set*, not just bytes.
+        staged.unlink(missing_ok=True)
+        raise
 
 
 def export_project(
