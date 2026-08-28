@@ -43,7 +43,10 @@ MARKER_FILENAME = "vault-project.yaml"
 
 #: Suffix for the sibling a publication write stages into before replacing its
 #: target. Inside the same directory so the replace is same-filesystem, and
-#: therefore atomic.
+#: therefore atomic. The name also carries the pid and a counter: a *fixed*
+#: sibling would silently consume a pre-existing file of that name — an operator
+#: file, or debris from a killed process — on the success path as well as the
+#: failure path, and #93 requires the pre-operation file set to survive.
 STAGING_SUFFIX = ".partial"
 SESSIONS_DIRNAME = "sessions"
 DECISIONS_FILENAME = "DECISIONS.md"
@@ -1142,6 +1145,28 @@ def _publish(
         raise
 
 
+def _free_staging_sibling(root: Path, target: Path) -> Path:
+    """A contained sibling of *target* that does not already exist.
+
+    Never reuses an occupied name. A fixed ``<target>.partial`` would be
+    overwritten on the way in and unlinked on the way out, so a file an operator
+    happened to leave there would be destroyed by an operation that then reports
+    having changed nothing — and `Creations` records only the target, so the
+    rollback could not put it back either (#93).
+
+    Folder operations are user-serialised per project (#77), so the pid and
+    counter are for distinguishing *leftovers* from a killed run, not for
+    concurrent writers.
+    """
+    attempt = 0
+    while True:
+        candidate = target.with_name(f"{target.name}.{os.getpid()}-{attempt}{STAGING_SUFFIX}")
+        guard_contained_path(root, candidate)
+        if not candidate.exists():
+            return candidate
+        attempt += 1
+
+
 def _write_recorded(root: Path, target: Path, text: str, record: "Creations") -> None:
     """Write one publication target atomically, recording what it displaced.
 
@@ -1161,7 +1186,11 @@ def _write_recorded(root: Path, target: Path, text: str, record: "Creations") ->
     else:
         record.files.append(target)
 
-    staged = target.with_name(target.name + STAGING_SUFFIX)
+    staged = _free_staging_sibling(root, target)
+    # Guarded there and again here: the #88 sweep is intraprocedural by design,
+    # so a path proven in a helper reads as unproven at its point of use. Paying
+    # one extra ancestry walk keeps the check local rather than adding an
+    # allowlist entry for calls that are in fact contained.
     guard_contained_path(root, staged)
     try:
         staged.write_text(text, encoding="utf-8", newline="\n")

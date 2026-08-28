@@ -2287,3 +2287,71 @@ def test_a_caller_supplied_record_still_owns_its_own_rollback(diverged, monkeypa
     assert record.replaced, "nothing recorded for the caller to restore"
     record.restore()
     assert archive.read_bytes() == original
+
+
+def _staging_lookalike(namespace):
+    """A file an operator (or a killed run) left where staging wants to write."""
+    archive = next((namespace / vault.SESSIONS_DIRNAME).glob("*.md"))
+    sibling = archive.with_name(archive.name + vault.STAGING_SUFFIX)
+    sibling.write_bytes(b"operator's notes, not ours\n")
+    return sibling
+
+
+def test_a_pre_existing_staging_sibling_survives_a_failed_publication(
+    diverged, monkeypatch
+):
+    """AC1: the rollback must not be the thing that changes the file set.
+
+    A fixed `<target>.partial` would be overwritten on the way in and unlinked on
+    the way out, and `Creations` records only the target — so the rollback could
+    not have put it back. The staging name is unique per write instead.
+    """
+    root, vault_root, namespace = diverged
+    sibling = _staging_lookalike(namespace)
+    before = _vault_snapshot(namespace)
+    _tear_write_at(monkeypatch, _is_vault_archive, keep=_body_only)
+
+    with pytest.raises(OSError):
+        vault.resolve_project(
+            root, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
+        )
+
+    assert sibling.read_bytes() == b"operator's notes, not ours\n"
+    assert _vault_snapshot(namespace) == before
+
+
+def test_a_pre_existing_staging_sibling_survives_a_successful_publication(diverged):
+    """The worse half of the same defect: a fixed name consumes it on success.
+
+    `os.replace(staged, target)` would have moved the operator's file onto the
+    archive — silent loss on the *happy* path, with no failure for anyone to
+    notice. #87's contract is explicit that an operator file inside the namespace
+    survives a sync, and that has to hold when the sync works.
+    """
+    root, vault_root, namespace = diverged
+    sibling = _staging_lookalike(namespace)
+
+    vault.resolve_project(
+        root, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
+    )
+
+    assert sibling.read_bytes() == b"operator's notes, not ours\n"
+    archive = next((namespace / vault.SESSIONS_DIRNAME).glob("*.md"))
+    assert b"operator's notes" not in archive.read_bytes()
+
+
+def test_staging_siblings_are_unique_per_write(tmp_path):
+    """The mechanism behind both tests above, pinned directly."""
+    root = tmp_path / "vault"
+    target = root / "projects" / "alpha" / vault.SESSIONS_DIRNAME / "s.md"
+    target.parent.mkdir(parents=True)
+
+    first = vault._free_staging_sibling(root, target)
+    first.write_bytes(b"occupied")
+    second = vault._free_staging_sibling(root, target)
+
+    assert first != second
+    assert second.name.endswith(vault.STAGING_SUFFIX)
+    assert not second.exists()
+    # Never collides with the archive glob, so a leftover cannot be read as one.
+    assert second not in set((target.parent).glob("*.md"))
