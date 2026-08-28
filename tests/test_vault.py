@@ -2522,26 +2522,71 @@ def test_a_dangling_escape_is_still_refused(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_admitted_archives_without_a_vouch_returns_the_listing_unchanged():
+def _namespace_with(tmp_path, **files):
+    namespace = tmp_path / "vault" / "projects" / "alpha" / vault.SESSIONS_DIRNAME
+    namespace.mkdir(parents=True)
+    for name, content in files.items():
+        target = namespace / name
+        target.write_bytes(content) if isinstance(content, bytes) else target.write_text(
+            content, encoding="utf-8"
+        )
+    return namespace.parent
+
+
+def test_reading_without_a_vouch_returns_the_whole_listing(tmp_path):
     """Folder mode's contract: no provenance source, so no narrowing."""
-    listing = {"sessions/a.md": "A", "sessions/b.md": "B"}
+    namespace = _namespace_with(tmp_path, **{"a.md": "A", "b.md": "B"})
 
-    assert vault.admitted_archives(listing, None) == listing
-
-
-def test_admitted_archives_keeps_only_the_vouched_paths():
-    listing = {"sessions/a.md": "A", "sessions/stray.md": "S"}
-
-    assert vault.admitted_archives(listing, {"sessions/a.md"}) == {"sessions/a.md": "A"}
+    assert vault.read_vault_archives(namespace) == {
+        "sessions/a.md": "A", "sessions/b.md": "B",
+    }
 
 
-def test_an_empty_vouch_admits_nothing_rather_than_everything():
+def test_reading_with_a_vouch_keeps_only_the_vouched_paths(tmp_path):
+    namespace = _namespace_with(tmp_path, **{"a.md": "A", "stray.md": "S"})
+
+    assert vault.read_vault_archives(namespace, {"sessions/a.md"}) == {"sessions/a.md": "A"}
+
+
+def test_an_empty_vouch_admits_nothing_rather_than_everything(tmp_path):
     """`set()` is not `None`: a transport that vouches for nothing means it.
 
     Worth pinning because the two are easy to conflate, and conflating them
     would restore the bypass on any clone whose namespace is untracked.
     """
-    assert vault.admitted_archives({"sessions/a.md": "A"}, set()) == {}
+    namespace = _namespace_with(tmp_path, **{"a.md": "A"})
+
+    assert vault.read_vault_archives(namespace, set()) == {}
+
+
+def test_an_unadmitted_file_is_never_read(tmp_path):
+    """#112's whole point: the membership test runs before the bytes.
+
+    Undecodable bytes are the instrument because they can only fail *at the
+    read*. Under #110's post-read filter this raised `UnicodeDecodeError` before
+    the narrowing ever ran, which is why filtering the returned mapping was not
+    enough.
+    """
+    namespace = _namespace_with(
+        tmp_path, **{"a.md": "A", "zzz-bad.md": b"\xff\xfe not utf-8 \xff"}
+    )
+
+    assert vault.read_vault_archives(namespace, {"sessions/a.md"}) == {"sessions/a.md": "A"}
+
+
+def test_an_admitted_unreadable_archive_is_still_a_torn_vault(tmp_path):
+    """The narrowing must not swallow the signal it was never meant to touch.
+
+    An *admitted* artifact that cannot be read is a torn vault and must still
+    raise; only unadmitted files became silent.
+    """
+    namespace = _namespace_with(tmp_path, **{"a.md": "A"})
+    (namespace / vault.SESSIONS_DIRNAME / "a.md").chmod(0o000)
+    try:
+        with pytest.raises(vault.VaultUnavailable):
+            vault.read_vault_archives(namespace, {"sessions/a.md"})
+    finally:
+        (namespace / vault.SESSIONS_DIRNAME / "a.md").chmod(0o644)
 
 
 def test_folder_export_still_reads_a_namespace_local_archive(tmp_path, checkout):

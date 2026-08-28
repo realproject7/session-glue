@@ -911,17 +911,28 @@ def read_local_archives(repo_root: Path | str) -> dict[str, str]:
     return archives
 
 
-def read_vault_archives(namespace: Path) -> dict[str, str]:
-    """Fully read every ``sessions/*.md`` present in the vault namespace.
+def read_vault_archives(
+    namespace: Path, admitted: set[str] | None = None
+) -> dict[str, str]:
+    """Fully read the ``sessions/*.md`` in the namespace the transport vouches for.
 
-    An artifact that is present but unreadable raises :class:`VaultUnavailable`
-    rather than being treated as absent — on a sync-client folder those two look
-    identical from a directory listing, and only a full read distinguishes them.
+    ``admitted`` holds namespace-relative POSIX paths; ``None`` means the caller
+    offers no provenance and the whole listing is read. The membership test runs
+    **before the bytes**, which is the whole point (#112). #110 narrowed the
+    returned mapping instead, and that left every reader-side failure intact: an
+    untracked undecodable file still raised out of `read_text` below, and an
+    untracked malformed one still reached :func:`materialize_document`. A file
+    that is never read cannot raise from either.
 
-    This is a listing, not a trust decision: it consults no reference set and
-    returns whatever is *there*, including a file no publication ever wrote. A
-    caller that is about to publish must first narrow it with
-    :func:`admitted_archives` (#110).
+    An admitted artifact that is present but unreadable raises
+    :class:`VaultUnavailable` rather than being treated as absent — on a
+    sync-client folder those two look identical from a directory listing, and
+    only a full read distinguishes them. That is a real torn-vault signal and
+    stays; what changes is that an *unadmitted* file can no longer produce it.
+
+    Provenance rather than shape: an untracked file can carry parseable
+    frontmatter and a filename matching its own ``session_id``, so any rule read
+    off the candidate's own bytes can be satisfied by writing those bytes (#110).
     """
     sessions_dir = Path(namespace) / SESSIONS_DIRNAME
     guard_contained_path(Path(namespace), sessions_dir)
@@ -929,35 +940,18 @@ def read_vault_archives(namespace: Path) -> dict[str, str]:
     if not sessions_dir.is_dir():
         return archives
     for path in sorted(sessions_dir.glob("*.md")):
+        relative_path = f"{SESSIONS_DIRNAME}/{path.name}"
+        if admitted is not None and relative_path not in admitted:
+            continue
         guard_contained_path(Path(namespace), path)
         try:
-            archives[f"{SESSIONS_DIRNAME}/{path.name}"] = path.read_text(encoding="utf-8")
+            archives[relative_path] = path.read_text(encoding="utf-8")
         except OSError as exc:
             raise VaultUnavailable(
                 f"vault not fully available: cannot read {path}: {exc}"
             ) from exc
     return archives
 
-
-
-def admitted_archives(
-    archives: dict[str, str], admitted: set[str] | None
-) -> dict[str, str]:
-    """Narrow a vault-side archive listing to what the transport vouches for.
-
-    ``admitted`` holds namespace-relative POSIX paths the transport is willing
-    to treat as vault artifacts; ``None`` means it offers no provenance and the
-    listing stands. Keeping the decision here — a set membership test on paths
-    the caller supplies — is what lets the Git transport contribute tracked-ness
-    without this module learning what a clone is.
-
-    Provenance rather than shape: an untracked file can carry parseable
-    frontmatter and a filename matching its own ``session_id``, so any rule read
-    off the candidate's own bytes can be satisfied by writing those bytes (#110).
-    """
-    if admitted is None:
-        return archives
-    return {path: text for path, text in archives.items() if path in admitted}
 
 # --------------------------------------------------------------------------- #
 # Operations
@@ -1093,7 +1087,9 @@ def _namespace_is_bootstrap(namespace: Path, sync_state: dict[str, Any] | None) 
     return True
 
 
-def _require_populated_namespace(namespace: Path, project_id: str) -> None:
+def _require_populated_namespace(
+    namespace: Path, project_id: str, admitted: set[str] | None = None
+) -> None:
     """Validate a populated namespace: marker, then state, then referenced content."""
     path = Path(namespace)
     if not (path / MARKER_FILENAME).is_file():
@@ -1105,10 +1101,12 @@ def _require_populated_namespace(namespace: Path, project_id: str) -> None:
     # A marker without state is a torn namespace, not an empty one: treating it
     # as empty would let an export overwrite state it never read.
     state = read_state(path, required=True)
-    require_referenced_archives(path, state)
+    require_referenced_archives(path, state, admitted)
 
 
-def require_referenced_archives(namespace: Path, state: dict[str, Any]) -> dict[str, str]:
+def require_referenced_archives(
+    namespace: Path, state: dict[str, Any], admitted: set[str] | None = None
+) -> dict[str, str]:
     """Fully read every archive the vault state references, before any write.
 
     Reading is the check: on a sync-client folder an online-only placeholder is
@@ -1116,7 +1114,7 @@ def require_referenced_archives(namespace: Path, state: dict[str, Any]) -> dict[
     bytes distinguishes "not synced yet" from "not there". A state that names a
     session no archive carries is a torn vault, not an empty one.
     """
-    archives = read_vault_archives(namespace)
+    archives = read_vault_archives(namespace, admitted)
     present = {_session_id_of(text) for text in archives.values()}
     referenced = {str(state.get("head_session_id") or "")}
     referenced.update(
@@ -1250,11 +1248,11 @@ def export_project(
     fault_after: int | None = None,
     write_local_state: bool = True,
     created: "Creations | None" = None,
-    admitted_archives_set: set[str] | None = None,
+    admitted: set[str] | None = None,
 ) -> str:
     """Export the local history into the vault; return the resulting state digest.
 
-    ``admitted_archives_set`` is the transport's provenance vouch: the
+    ``admitted`` is the transport's provenance vouch: the
     namespace-relative paths it accepts as vault artifacts. Anything else in the
     namespace is unknown and is neither republished nor rewritten — it is left
     exactly where the operator left it, the way #104 leaves an unknown path.
@@ -1279,13 +1277,11 @@ def export_project(
 
     bootstrap = _namespace_is_bootstrap(namespace, read_sync_state(root))
     if not bootstrap:
-        _require_populated_namespace(namespace, project_id)
+        _require_populated_namespace(namespace, project_id, admitted)
     # Narrowed at the read, before anything consults it: the divergence check,
     # the gate's `changed` comparison and the published `content` must all see
     # the same admitted set, or an unknown file would still steer one of them.
-    vault_archives = admitted_archives(
-        {} if bootstrap else read_vault_archives(namespace), admitted_archives_set
-    )
+    vault_archives = {} if bootstrap else read_vault_archives(namespace, admitted)
     vault_state = {"head_session_id": "", "lifecycle": [], "acknowledgements": []}
     if not bootstrap:
         vault_state = read_state(namespace)
@@ -1400,7 +1396,12 @@ def _pull_divergence(
     return kinds, unresolvable
 
 
-def import_project(repo_root: Path | str, vault_root: Path | str, project_id: str) -> str:
+def import_project(
+    repo_root: Path | str,
+    vault_root: Path | str,
+    project_id: str,
+    admitted: set[str] | None = None,
+) -> str:
     """Import the vault into the local history; return the resulting state digest."""
     root = Path(repo_root)
     require_project_id(root, project_id)
@@ -1409,10 +1410,16 @@ def import_project(repo_root: Path | str, vault_root: Path | str, project_id: st
         raise VaultUnavailable(
             f"vault not fully available: {namespace} is absent or empty"
         )
-    _require_populated_namespace(namespace, project_id)
+    _require_populated_namespace(namespace, project_id, admitted)
 
     vault_state = read_state(namespace)
-    vault_archives = read_vault_archives(namespace)
+    # The pull side of #110's boundary: an untracked clone-local archive is not
+    # vault input, so it cannot be materialized into `.agent-history` and cannot
+    # supply the head that drives `LATEST.md`, `INDEX.yaml` or the resume prompt
+    # (#112). `rebuild_derived` takes the first insertion-order match for the
+    # head session id, and on a *fresh* checkout the union is the vault's
+    # archives alone — so a lexically earlier forgery would win outright.
+    vault_archives = read_vault_archives(namespace, admitted)
     if not vault_archives:
         raise VaultUnavailable("vault not fully available: no archives under sessions/")
 
@@ -1613,7 +1620,7 @@ def resolve_project(
     write_local_state: bool = True,
     created: "Creations | None" = None,
     defer_local: list | None = None,
-    admitted_archives_set: set[str] | None = None,
+    admitted: set[str] | None = None,
 ) -> str:
     """Resolve every named conflict with explicit selectors and publish the result.
 
@@ -1632,7 +1639,7 @@ def resolve_project(
     root = Path(repo_root)
     require_project_id(root, project_id)
     namespace = project_dir(Path(vault_root), project_id)
-    _require_populated_namespace(namespace, project_id)
+    _require_populated_namespace(namespace, project_id, admitted)
 
     archive_choices = dict(archive_choices or {})
     lifecycle_choices = dict(lifecycle_choices or {})
@@ -1648,7 +1655,7 @@ def resolve_project(
     # publishes, so an unknown file here is not an ungated publication — but it
     # must not be able to demand an acknowledgement, nor be published once one is
     # given (#110).
-    vault_archives = admitted_archives(read_vault_archives(namespace), admitted_archives_set)
+    vault_archives = read_vault_archives(namespace, admitted)
 
     by_session_local = {_session_id_of(t): (p, t) for p, t in local_canonical.items()}
     by_session_vault = {_session_id_of(t): (p, t) for p, t in vault_archives.items()}

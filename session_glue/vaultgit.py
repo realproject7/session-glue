@@ -388,7 +388,7 @@ def push(repo_root: Path | str, clone: Path | str, project_id: str, **kwargs) ->
         return vault.export_project(
             repo_root, clone_path, project_id, write_local_state=False,
             created=created,
-            admitted_archives_set=tracked_artifacts(clone_path, project_id),
+            admitted=tracked_artifacts(clone_path, project_id),
             **kwargs
         )
 
@@ -403,7 +403,7 @@ def resolve(repo_root: Path | str, clone: Path | str, project_id: str, head_sess
         return vault.resolve_project(
             repo_root, clone_path, project_id, head_session, write_local_state=False,
             created=created, defer_local=deferred,
-            admitted_archives_set=tracked_artifacts(clone_path, project_id),
+            admitted=tracked_artifacts(clone_path, project_id),
             **kwargs
         )
 
@@ -418,9 +418,18 @@ def pull(repo_root: Path | str, clone: Path | str, project_id: str) -> str:
 
     Read-only with respect to the remote, so it makes no commit and no push, and
     the local baseline is written by the core in the ordinary way.
+
+    Carries the same tracked-artifact admission the push side uses (#110), so a
+    clone-local untracked archive is not vault input in either direction (#112).
     """
     vault.require_project_id(Path(repo_root), project_id)
     clone_path = Path(clone)
     branch, upstream = preflight(clone_path)
     fetch_and_fast_forward(clone_path, branch, upstream)
-    return vault.import_project(repo_root, clone_path, project_id)
+    # After the fast-forward, never before: the index must describe the tree the
+    # import is about to read, or an archive that arrived with the fetch would
+    # be classified as unknown and silently dropped from the pull (#112).
+    return vault.import_project(
+        repo_root, clone_path, project_id,
+        admitted=tracked_artifacts(clone_path, project_id),
+    )
