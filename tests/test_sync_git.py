@@ -2461,6 +2461,15 @@ def _vault_with_a_unique_archive(tmp_path, transport, clone):
     Built from a *separate* history rather than by deleting the archive from the
     checkout: removing a local archive leaves the derived views referencing it,
     so the fixture would fail validation for a reason unrelated to what it tests.
+
+    **The separate history carries its own `session_id`, and that is load-bearing**
+    — do not simplify this into a vault that merely holds an extra *file*. The
+    sync-state control asserts that a rolled-back import leaves `VAULT-SYNC.yaml`
+    unchanged, which is only an assertion if the import would otherwise have
+    changed it. The stored digest is of the vault *state*, so the vault's state
+    has to differ from the local baseline, not just its file set. A vault-only
+    file with a `session_id` the checkout already has moves nothing, and the
+    control would pass while proving nothing (RE2, PR #129).
     """
     other = tmp_path / "other-device"
     _write_history(other, session_id="2026-08-27-0900-bravo")
