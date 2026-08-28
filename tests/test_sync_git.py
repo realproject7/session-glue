@@ -934,3 +934,175 @@ def test_resolve_over_git_blocked_by_decisions_creates_no_commit(
     ).stdout.strip() == remote_before
     assert vault.sync_state_path(checkout).read_bytes() == baseline
     assert not (clone / "projects" / "alpha" / "conflicts").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Issue #104 — unknown in-namespace paths are skipped, never staged or pushed
+# --------------------------------------------------------------------------- #
+
+
+SECRET_SHAPED = "ghp_" + "u" * 20
+
+
+def _pushed_paths(bare_remote: Path) -> set[str]:
+    """Exactly what reached the remote — the surface an operator's data leaks to."""
+    return set(
+        subprocess.run(
+            ["git", "-C", str(bare_remote), "ls-tree", "-r", "--name-only", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+    )
+
+
+def _second_session(checkout: Path) -> str:
+    """Give the next push real work, so 'nothing published' is distinguishable."""
+    _write_history(checkout, session_id="2026-08-29-0900-second")
+    return "projects/alpha/sessions/2026-08-29-0900-second.md"
+
+
+@pytest.mark.parametrize(
+    "unknown_rel",
+    ["projects/alpha/unknown-private.txt", "projects/alpha/sessions/nested-private.txt"],
+    ids=["namespace-root", "nested-under-sessions"],
+)
+def test_an_unknown_in_namespace_path_is_skipped_not_published(
+    tmp_path, checkout, clone, bare_remote, unknown_rel
+):
+    """AC1 + AC4: the unknown path stays local, and the real work still ships.
+
+    Asserted **positively** on what reached the remote, not only on the unknown
+    path's absence. Every way this fix can break — a Windows separator mismatch,
+    using `Creations.files` without `.replaced`, an unrecorded writer — makes
+    `stage_commit_push` stage *nothing*, return `False`, and exit 0. An
+    absence-only assertion passes on all of them, because in each case nothing
+    was published at all. The expected-artifact assertion is the one that fails.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    (clone / unknown_rel).write_text(f"token {SECRET_SHAPED}\n", encoding="utf-8")
+    expected = _second_session(checkout)
+
+    # AC1: skipped, not fatal — the sync succeeds.
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    pushed = _pushed_paths(bare_remote)
+    assert expected in pushed, "the generated artifact was not published"
+    assert unknown_rel not in pushed
+    # It remains where the operator left it, untracked.
+    assert (clone / unknown_rel).is_file()
+    assert unknown_rel in _git(clone, "status", "--porcelain").stdout
+
+
+def test_an_interrupted_publication_sibling_is_skipped_not_published(
+    checkout, clone, bare_remote
+):
+    """AC1's named case: `<target>.<pid>-<n>.partial` left by a killed run.
+
+    This is why unknown paths are skipped rather than refused — under a refusal
+    one crashed publication would wedge every later sync until an operator
+    deleted a file they do not know exists.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    archive = next((clone / "projects" / "alpha" / "sessions").glob("*.md"))
+    leftover = archive.with_name(archive.name + ".99999-0" + vault.STAGING_SUFFIX)
+    leftover.write_text("half-written archive bytes\n", encoding="utf-8")
+    expected = _second_session(checkout)
+
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    pushed = _pushed_paths(bare_remote)
+    assert expected in pushed
+    assert not [p for p in pushed if p.endswith(vault.STAGING_SUFFIX)]
+    assert leftover.is_file()
+
+
+def test_a_no_op_sync_with_an_unknown_path_creates_no_commit(checkout, clone):
+    """AC3: extends `test_no_op_repeated_sync_is_clean` with an unknown file present.
+
+    Before #104 the unknown path made a no-op sync produce a commit — 2, 2, 3.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    commits = len(_git(clone, "log", "--oneline").stdout.strip().splitlines())
+    (clone / "projects" / "alpha" / "unknown-private.txt").write_text(
+        f"token {SECRET_SHAPED}\n", encoding="utf-8"
+    )
+
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    assert len(_git(clone, "log", "--oneline").stdout.strip().splitlines()) == commits
+
+
+def test_acknowledgement_does_not_publish_an_unknown_path(checkout, clone, bare_remote):
+    """AC1: acknowledgement is not an escape hatch.
+
+    The gate never sees an unknown path — it is not a publication artifact — so
+    there is no triple to acknowledge. Passing one must not change the outcome.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    unknown = clone / "projects" / "alpha" / "unknown-private.txt"
+    unknown.write_text(f"token {SECRET_SHAPED}\n", encoding="utf-8")
+    expected = _second_session(checkout)
+
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+        "--acknowledge", f"unknown-private.txt:{'0'*64}:GitHub token (ghp_/gho_)",
+    ) == 0
+
+    pushed = _pushed_paths(bare_remote)
+    assert expected in pushed
+    assert "projects/alpha/unknown-private.txt" not in pushed
+
+
+def test_a_second_push_still_publishes_replaced_artifacts(checkout, clone, bare_remote):
+    """The `Creations.files`-only trap: complete on a first push, broken after.
+
+    `files` alone records only *created* targets. On a fresh vault everything is
+    created, so a first-push test goes green on the broken version; from the
+    second push on, every replaced artifact would classify as unknown and quietly
+    stop publishing. This publishes twice for that reason.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    # A new session, not an edited one: editing an existing archive trips #89's
+    # divergence guard before publication and would never reach the staging code
+    # this test exists to exercise.
+    expected_new = _second_session(checkout)
+
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    # What the *second* commit touched — the state file and marker are rewritten
+    # on every publication, so they are `replaced`, never `created`, from here on.
+    changed = set(
+        _git(clone, "show", "--name-only", "--format=", "HEAD").stdout.split()
+    )
+    assert expected_new in changed
+    assert "projects/alpha/state/vault-state.yaml" in changed, (
+        "a replaced artifact was not staged — `Creations.files` alone would do this"
+    )
+    assert expected_new in _pushed_paths(bare_remote)

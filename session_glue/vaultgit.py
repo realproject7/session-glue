@@ -221,20 +221,33 @@ def restore(clone: Path, commit: str) -> GitResult:
 
 
 def stage_commit_push(
-    clone: Path, project_id: str, branch: str, upstream: str, message: str
+    clone: Path, project_id: str, branch: str, upstream: str, message: str,
+    artifacts: set[str],
 ) -> bool:
-    """Stage exactly this project's paths, make one commit, and push it.
+    """Stage exactly the artifacts this operation wrote, commit once, and push.
 
-    Returns ``False`` when there was nothing to commit. Staging is restricted to
-    ``projects/<id>/`` — never ``git add -A`` or ``.`` — so a pre-existing
-    conflict or an unrelated change in the vault clone is neither staged nor
-    disturbed.
+    Returns ``False`` when there was nothing to commit.
+
+    ``artifacts`` is the set of repo-relative POSIX paths the publication
+    actually wrote. Staging the *namespace* instead — ``git add -- projects/<id>``
+    — swept in anything an operator or a crashed run had left beneath it, and the
+    preflight could not see it because ``git status --untracked-files=no``
+    ignores untracked files by design. An unknown file was therefore committed
+    and pushed without ever reaching the privacy gate (#104).
+
+    Unknown paths are **skipped, not refused**: they stay untracked and
+    unpublished and the sync still succeeds. Refusing would wedge the transport
+    after an interrupted publication leaves a ``<target>.<pid>-<n>.partial``
+    sibling behind — the crash this vault is built to survive.
     """
     path = Path(clone)
     vault.validate_project_id(project_id)
     project_path = f"{vault.PROJECTS_DIRNAME}/{project_id}"
 
-    added = _run_git(path, ["add", "--", project_path], LOCAL_TIMEOUT)
+    if not artifacts:
+        return False
+
+    added = _run_git(path, ["add", "--", *sorted(artifacts)], LOCAL_TIMEOUT)
     if added.returncode != 0:
         raise GitVaultError(f"{CATEGORY_NOT_A_REPOSITORY}: cannot stage {project_path}")
 
@@ -305,7 +318,16 @@ def sync(
     created = vault.Creations()
     try:
         digest = operation(clone_path, created)
-        stage_commit_push(clone_path, project_id, branch, upstream, message)
+        # Exactly what the publication wrote: created targets plus the ones it
+        # replaced. `.as_posix()` because git speaks forward slashes on every
+        # platform while `str(Path)` does not on Windows — a mismatch there
+        # would classify every artifact as unknown and publish nothing, silently
+        # (#104). Same reason `skills.py` and `vault.contained_offset` do it.
+        artifacts = {
+            target.relative_to(clone_path).as_posix()
+            for target in [*created.files, *(t for t, _ in created.replaced)]
+        }
+        stage_commit_push(clone_path, project_id, branch, upstream, message, artifacts)
     except Exception as exc:
         # Two halves, and neither covers the other: the reset restores tracked
         # bytes and discards our commit, and `created.undo()` removes artifacts
