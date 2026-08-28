@@ -41,17 +41,21 @@ natural language to glue / freeze / checkpoint / hand off the current session:
    status, primary_goal, active_context_files, completed_tasks, next_todo_items,
    known_issues, search_tags, validation.
 
-   Every body heading is required, written exactly as shown at the top level.
-   The prose beneath each one is never inspected, but the heading must be there:
+   Every body heading below is required. Copy them verbatim, each at the start
+   of its own line with no leading whitespace — the validator matches the exact
+   line, so an indented heading does not count. The prose beneath each one is
+   never inspected, but the heading must be there:
 
-     # Resume Prompt
-     # What We Did
-     # Current State
-     # Decisions Made
-     # Failed Attempts / Dead Ends
-     # Next-Agent Instructions
-     # Commands And Validation
-     # Risks And Constraints
+```
+# Resume Prompt
+# What We Did
+# Current State
+# Decisions Made
+# Failed Attempts / Dead Ends
+# Next-Agent Instructions
+# Commands And Validation
+# Risks And Constraints
+```
 
    `next_todo_items[0]` MUST be the first productive work item, never a resume
    mechanic (do not write "read LATEST.md", "paste the prompt", "start a new

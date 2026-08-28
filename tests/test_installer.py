@@ -148,10 +148,18 @@ def _advertised_fields() -> list[str]:
 
 
 def _advertised_sections() -> list[str]:
+    """The headings exactly as the block renders them — deliberately not stripped.
+
+    Stripping would hide the defect this exists to catch: the validator compares
+    the whole line (`schema.py:513`, `line.rstrip()` trims trailing space only),
+    so a heading the block displays indented is one an operator copies and the
+    validator then rejects. Returning the raw line means the validator test below
+    exercises what is actually on screen.
+    """
     return [
-        line.strip()
+        line
         for line in installer.managed_block().splitlines()
-        if line.strip().startswith("# ")
+        if line.startswith("# ")
     ]
 
 
@@ -173,10 +181,12 @@ def test_a_handoff_built_from_the_blocks_own_claims_passes_the_validator():
     """AC1, end to end: the point is not that the strings match, but that an
     agent following the block produces something `glue validate` accepts.
 
-    Field *names* matching the schema would still leave the guidance wrong if,
-    say, a heading were written at the wrong level — the validator matches `# `
-    at line start. So this assembles a document from what the block advertises
-    and runs the real validator over it.
+    Field *names* matching the schema would still leave the guidance wrong if a
+    heading were displayed in a form the validator rejects. It was: the block
+    first rendered the headings indented five spaces, which `Handoff.validate`
+    refuses, while this test stripped them and passed anyway. The headings are
+    now used **verbatim**, so the document under test is the one an operator
+    copying the block would actually produce.
     """
     values = {
         "session_id": "2026-08-28-1200-alpha",
