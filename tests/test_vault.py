@@ -2071,16 +2071,20 @@ def test_the_manifest_is_assembled_but_not_treated_as_user_content(diverged_vaul
 def test_published_content_is_exactly_the_gated_set_plus_two_named_exemptions(
     diverged_vault, monkeypatch
 ):
-    """AC1, asserted where it is now enforced: at the gate call, not after it.
+    """AC1, observed end to end: what the gate was handed, versus what was published.
 
-    The fix reversed a dependency rather than reordering statements — published
-    content is built *from* the gated mapping, so an ungated artifact is not
-    detected at publication, it cannot be assembled. That leaves nothing to
-    inject from outside, so this pins the property at its source: what the gate
-    was handed, versus what reached the vault.
+    `resolve_project` assembles the final mapping, hands the gate everything in
+    it except the named exemptions, and publishes that same mapping unchanged.
+    There is no separate check to call and nothing to inject from outside, so
+    this observes the two ends instead: `gate_artifacts` is spied to capture its
+    input, and the vault directory is read afterwards to see what actually
+    landed.
 
-    Only two things may differ, and both are named in #91: the tooling-written
-    manifest, and a decision carried forward byte-identical from the vault.
+    Only two artifacts may be published without having been gated, and #91 names
+    both: the tooling-written manifest, and a decision carried forward
+    byte-identical from the vault. Vault-owned bookkeeping — the state file and
+    the marker — is subtracted because it is written by `_publish`, not drawn
+    from the content mapping at all.
     """
     root, vault_root = diverged_vault
     _local_decisions(root, f"# Decisions\n\n- 2026-08-28 {SESSION} 1 keep this\n")
