@@ -413,7 +413,12 @@ def resolve(repo_root: Path | str, clone: Path | str, project_id: str, head_sess
     )
 
 
-def pull(repo_root: Path | str, clone: Path | str, project_id: str) -> str:
+def pull(
+    repo_root: Path | str,
+    clone: Path | str,
+    project_id: str,
+    ledger: dict[str, str] | None = None,
+) -> str:
     """Import from a Git vault: fast-forward the clone, then import locally.
 
     Read-only with respect to the remote, so it makes no commit and no push, and
@@ -432,4 +437,5 @@ def pull(repo_root: Path | str, clone: Path | str, project_id: str) -> str:
     return vault.import_project(
         repo_root, clone_path, project_id,
         admitted=tracked_artifacts(clone_path, project_id),
+        ledger=ledger,
     )

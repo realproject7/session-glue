@@ -781,27 +781,35 @@ def _cmd_sync_recover_duplicates(args: argparse.Namespace) -> int:
             clone_path = None
             vault.require_available_namespace(_resolved_vault_dir(args), args.project_id)
 
+        # Snapshot before the first move: AC3 requires derived views, decisions
+        # and the sync state restored to exact pre-command bytes, and only a
+        # record taken now describes the state the operator actually had.
+        snapshot = vault.snapshot_local_artifacts(root)
         quarantine, moved = vault.quarantine_duplicates(root, duplicates, stamp)
         print(f"quarantined {len(moved)} archive(s) under {quarantine}")
+        # The transaction ledger: every artifact this invocation materializes,
+        # with the bytes it wrote. The rollback may replace only what it can
+        # prove it wrote and that still matches (#124).
+        ledger: dict[str, str] = {}
         try:
             if clone_path is not None:
-                return vaultgit.pull(root, clone_path, args.project_id)
-            return vault.import_project(root, _resolved_vault_dir(args), args.project_id)
-        except BaseException:
+                return vaultgit.pull(root, clone_path, args.project_id, ledger=ledger)
+            return vault.import_project(
+                root, _resolved_vault_dir(args), args.project_id, ledger=ledger
+            )
+        except BaseException as exc:
             # Non-deterministic failures remain — a fetch that dies mid-flight,
-            # a vault that goes away between the check and the read. Put the
-            # archives back so the retry has duplicates to find again.
-            stranded = vault.restore_quarantined(root, quarantine, moved)
-            if stranded:
-                print(
-                    "could not restore (a file reappeared at the same path; "
-                    f"the quarantined copy is kept under {quarantine}): "
-                    + ", ".join(stranded),
-                    file=sys.stderr,
-                )
-            else:
-                print("no changes were kept; active archives were restored", file=sys.stderr)
-            raise
+            # a vault that goes away between the check and the read, a sync-state
+            # write that fails after materialization already landed.
+            outcome = vault.restore_quarantined(root, quarantine, moved, ledger)
+            outcome.collisions.extend(
+                vault.restore_local_artifacts(root, snapshot, ledger)
+            )
+            detail = vault._recovery_outcome_detail(outcome, quarantine)
+            # An actionable error, not a raw traceback: the operator has to know
+            # what state their history is in, and #124 requires every collision
+            # or restore failure to be reported (AC2).
+            raise vault.VaultError(f"recovery failed: {exc}{detail}") from exc
 
     return _run_sync(operation)
 

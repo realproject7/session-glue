@@ -2338,3 +2338,97 @@ def test_a_folder_failure_after_preflight_also_rolls_back(tmp_path, checkout, mo
     ) == cli.EXIT_ERROR
 
     assert _history_state(checkout) == before
+
+
+# --------------------------------------------------------------------------- #
+# Issue #124 — end-to-end: the whole recovery is one transaction
+# --------------------------------------------------------------------------- #
+
+
+def test_a_post_materialization_failure_restores_exact_pre_command_state(
+    tmp_path, checkout, clone, monkeypatch
+):
+    """Gap 2 end to end: the sync-state write fails after materialization.
+
+    Before #124 the rollback refused to overwrite the re-materialized archive —
+    correctly, under the old absolute rule — and so stranded the original and
+    left refreshed derived views. The ledger is what makes replacing our own
+    write distinguishable from clobbering an operator's.
+    """
+    _baseline(checkout, clone)
+    _duplicate_archive(checkout, "000-earlier")
+    before = _history_state(checkout)
+    monkeypatch.setattr(
+        vault, "write_sync_state",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("injected sync-state fault")),
+    )
+
+    assert _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", "--vault-git-dir", str(clone), "--apply",
+    ) == cli.EXIT_ERROR
+
+    after = _history_state(checkout)
+    assert after["sessions"] == before["sessions"], "active archives were not restored"
+    assert after["index"] == before["index"], "derived views were not restored"
+    assert after["latest"] == before["latest"]
+    assert after["resume"] == before["resume"]
+    assert after["quarantines"] == [], "an original was left stranded in quarantine"
+    assert validator.validate_history(checkout, check_sessions=True) == []
+
+
+def test_the_cli_reports_an_actionable_error_rather_than_a_traceback(
+    tmp_path, checkout, clone, monkeypatch, capsys
+):
+    """AC2: every collision or restore failure is reported actionably.
+
+    Both #124 gaps surfaced as uncaught `OSError` tracebacks before this — a
+    traceback is not a report, and the operator has to know what state their
+    history is in.
+    """
+    _baseline(checkout, clone)
+    _duplicate_archive(checkout, "000-earlier")
+    monkeypatch.setattr(
+        vault, "write_sync_state",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("injected sync-state fault")),
+    )
+
+    assert _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", "--vault-git-dir", str(clone), "--apply",
+    ) == cli.EXIT_ERROR
+
+    err = capsys.readouterr().err
+    assert "recovery failed" in err
+    assert "active archives were restored" in err
+
+
+def test_an_unrestorable_source_is_named_in_the_cli_error(
+    tmp_path, checkout, clone, monkeypatch, capsys
+):
+    """AC4: an unavailable quarantined source is recorded and named, never skipped."""
+    _baseline(checkout, clone)
+    _duplicate_archive(checkout, "000-earlier")
+    real_restore = vault.restore_quarantined
+
+    def remove_then_restore(root, quarantine, moved, ledger=None):
+        victim = Path(quarantine) / "000-earlier.md"
+        if victim.exists():
+            victim.unlink()
+        return real_restore(root, quarantine, moved, ledger)
+
+    monkeypatch.setattr(vault, "restore_quarantined", remove_then_restore)
+    monkeypatch.setattr(
+        vault, "write_sync_state",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("injected sync-state fault")),
+    )
+
+    assert _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", "--vault-git-dir", str(clone), "--apply",
+    ) == cli.EXIT_ERROR
+
+    err = capsys.readouterr().err
+    assert "no longer available" in err
+    assert "not an exact restoration" in err
+    assert "sessions/000-earlier.md" in err
