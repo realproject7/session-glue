@@ -936,27 +936,41 @@ _GUARD_CALLS = frozenset({
     "_read_text", "reject_symlink", "assert_within",
 })
 
-#: Filesystem calls that are unguarded *by design*, keyed by `function.verb` so
-#: an exemption covers one operation rather than a whole body -- a blanket
-#: function-level waiver would re-open every other call in it, which is the
-#: pressure a false positive creates. Each entry is a claim someone must defend
-#: at review; an empty reason is not accepted, and an entry that stops being
-#: needed is reported as stale rather than left to rot.
+#: Filesystem calls that are unguarded *by design*, keyed by the exact operation
+#: -- `(function, verb, target expression)` -- and carrying **how many** such
+#: calls the reason covers.
 #:
-#: Both entries below are the same pattern: a path recovered from a list that
-#: only ever received targets already proven contained. The sweep does not trace
+#: The count is the point. Keying by function alone waives a whole body; keying
+#: by `function.verb` still waives *every* `unlink` in that method, so a future
+#: unrelated `target.unlink()` would inherit a justification written for the
+#: rollback. An exemption is a claim about specific calls, so it says how many
+#: it is willing to defend: the (n+1)th is an offender, a different target is an
+#: offender, and an entry covering more calls than exist is reported stale.
+#:
+#: Line numbers are deliberately *not* part of the key. They would make every
+#: edit above a call look like a new exemption, and the resulting churn teaches
+#: reviewers to re-stamp the allowlist without reading it.
+#:
+#: All four entries are the same pattern: a path recovered from a list that only
+#: ever received targets already proven contained. The sweep does not trace
 #: values through containers, so it cannot see that -- a limit, stated here
 #: rather than papered over.
 _UNGUARDED_BY_DESIGN = {
-    "Creations.undo.unlink": "removes only files recorded during a guarded write",
-    "Creations.undo.rmdir": "removes only directories recorded during a guarded write",
-    "LocalWrite.commit.unlink": (
-        "rollback path: every target in `applied` went through `_prepare_target` "
-        "in the try body before it was appended"
+    ("Creations.undo", "unlink", "target"): (
+        1, "removes only files recorded during a guarded write"
     ),
-    "LocalWrite.commit.write_bytes": (
+    ("Creations.undo", "rmdir", "directory"): (
+        1, "removes only directories recorded during a guarded write"
+    ),
+    ("LocalWrite.commit", "unlink", "target"): (
+        1,
+        "rollback path: every target in `applied` went through `_prepare_target` "
+        "in the try body before it was appended",
+    ),
+    ("LocalWrite.commit", "write_bytes", "target"): (
+        1,
         "rollback path: restores the bytes of a target `_prepare_target` already "
-        "proved contained on the way in"
+        "proved contained on the way in",
     ),
 }
 
@@ -1107,7 +1121,9 @@ def unguarded_fs_targets(source):
                 # A copy: what a branch proves stays in the branch.
                 scan(block, set(proven), report)
 
-    offenders, exercised = [], set()
+    import collections
+
+    offenders, seen = [], collections.Counter()
     for node in ast.walk(tree):
         # Methods are walked exactly like module functions: every raw byte-level
         # operation in vault.py lives on a class, so a sweep that missed them
@@ -1134,18 +1150,28 @@ def unguarded_fs_targets(source):
 
         scan(node.body, set(), report)
 
-        for lineno, verb, target, ok, why in found:
+        for lineno, verb, target, ok, why in sorted(found):
             if ok:
                 continue
-            key = f"{name}.{verb}"
-            if key in _UNGUARDED_BY_DESIGN:
-                exercised.add(key)
+            key = (name, verb, target)
+            allowed = _UNGUARDED_BY_DESIGN.get(key, (0, ""))[0]
+            seen[key] += 1
+            if seen[key] <= allowed:
                 continue
+            extra = (
+                f" -- the allowlist covers {allowed}, this is #{seen[key]}"
+                if allowed
+                else ""
+            )
             offenders.append(
-                f"{name} {why}: {target or '?'} via .{verb}() at line {lineno}"
+                f"{name} {why}: {target or '?'} via .{verb}() at line {lineno}{extra}"
             )
 
-    stale = sorted(set(_UNGUARDED_BY_DESIGN) - exercised)
+    stale = sorted(
+        f"{name}.{verb}({target}) covers {allowed}, found {seen[(name, verb, target)]}"
+        for (name, verb, target), (allowed, _) in _UNGUARDED_BY_DESIGN.items()
+        if seen[(name, verb, target)] < allowed
+    )
     return offenders, stale
 
 
@@ -1182,8 +1208,10 @@ def test_every_vault_helper_reaching_the_filesystem_guards_containment():
 
     offenders, stale = unguarded_fs_targets(inspect.getsource(vault))
     assert offenders == [], "unguarded filesystem access in vault.py: " + "; ".join(offenders)
-    assert stale == [], f"no longer needed, remove them from the allowlist: {stale}"
-    assert all(_UNGUARDED_BY_DESIGN.values()), "every allowlist entry needs a stated reason"
+    assert stale == [], f"allowlist entries cover calls that no longer exist: {stale}"
+    assert all(
+        reason.strip() for _, reason in _UNGUARDED_BY_DESIGN.values()
+    ), "every allowlist entry needs a stated reason"
 
 
 #: Each case is source the sweep *must* flag, paired with why it would have
@@ -1238,6 +1266,27 @@ def _swap(root, staged, target):
 def _swap(root, staged, target):
     guard_contained_path(root, staged)
     shutil.move(staged, target)
+""",
+    # An exemption is a claim about specific calls, not a licence for the verb.
+    # These use the real allowlisted qualnames, so they are the exemption's own
+    # boundary rather than a lookalike.
+    "a second unguarded unlink beside an allowlisted one": """
+class LocalWrite:
+    def commit(self, target):
+        target.unlink()
+        target.unlink()
+""",
+    "an unguarded unlink on a different target in an allowlisted method": """
+class LocalWrite:
+    def commit(self, target, other):
+        target.unlink()
+        other.unlink()
+""",
+    "an unguarded verb the allowlisted method does not have an exemption for": """
+class LocalWrite:
+    def commit(self, target):
+        target.unlink()
+        target.write_text("x")
 """,
     # Guarding the receiver is correct for containment and still not enough:
     # `vault.py` has no business creating the thing its every other guard
@@ -1339,6 +1388,12 @@ def _fine(root, directory):
     for path in directory.glob("*.md"):
         guard_contained_path(root, path)
         yield path.read_text()
+""",
+    # Exactly the one call the reason defends, and no more.
+    "the single unguarded unlink the allowlist actually covers": """
+class LocalWrite:
+    def commit(self, target):
+        target.unlink()
 """,
     "a guard at body level with the write nested two blocks deep": """
 def _fine(root, target, flag, items):
