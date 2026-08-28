@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from session_glue import cli, schema, vault, vaultgit, writer
+from session_glue.vault import SESSIONS_DIRNAME
 
 from test_vault import BODY, _frontmatter, _write_history
 
@@ -1329,3 +1330,53 @@ def test_a_custom_archive_name_is_admitted_because_it_is_tracked(tmp_path, clone
     assert vault.admitted_archives(
         {"sessions/named-by-hand.md": "x"}, admitted
     ) == {"sessions/named-by-hand.md": "x"}
+
+
+def test_a_custom_archive_name_is_still_admitted_on_a_subsequent_sync(
+    tmp_path, clone, bare_remote
+):
+    """AC5 end to end: a later export still admits a custom-named archive.
+
+    Presence in the remote cannot show this by itself. The archive was committed
+    by the first push and nothing deletes it, so it stays in the remote whether
+    or not a later publication admits it — the same reason over-filtering has no
+    symptom on disk. What discriminates is #89's same-session divergence check:
+    it fires only for a path present in the *admitted* vault-side set, so an
+    edit to the custom-named archive must still be refused. Under a
+    filename-based rule it would be dropped from that set and the edit would
+    publish silently.
+    """
+    root = tmp_path / "custom"
+    root.mkdir()
+    frontmatter = _frontmatter(str(root), None)
+    handoff = schema.Handoff.from_frontmatter(frontmatter, BODY)
+    writer.create_handoff(
+        repo_root=root, frontmatter=frontmatter, body=BODY, handoff=handoff,
+        archive_name="named-by-hand",
+    )
+    assert _run(
+        "sync", "push", "--repo-root", str(root), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    # A second sync with real work: the custom-named archive must survive it.
+    _write_history(root, session_id="2026-08-29-0900-second")
+    assert _run(
+        "sync", "push", "--repo-root", str(root), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    pushed = _pushed_paths(bare_remote)
+    assert "projects/alpha/sessions/named-by-hand.md" in pushed
+    assert "projects/alpha/sessions/2026-08-29-0900-second.md" in pushed
+
+    # The discriminating half: still admitted, so still compared.
+    custom = root / ".agent-history" / SESSIONS_DIRNAME / "named-by-hand.md"
+    custom.write_text(
+        custom.read_text(encoding="utf-8").replace("Did the thing.", "Edited locally."),
+        encoding="utf-8",
+    )
+    assert _run(
+        "sync", "push", "--repo-root", str(root), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == cli.EXIT_CONFLICT
