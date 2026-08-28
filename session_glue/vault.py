@@ -280,6 +280,12 @@ def canonicalize_document(text: str) -> str:
     ``repo_root`` becomes exactly ``<vault-root>``. ``project_root`` becomes
     exactly ``<vault-root>`` when the two are equal — the ordinary case — and
     otherwise ``<vault-root>/<offset>`` with no trailing separator.
+
+    An out-of-repository ``project_root`` is refused here rather than flattened,
+    and the refusal names the session: #77 requires sync to report the *blocking
+    session ID*, and `contained_offset` sees only the two paths. Without it the
+    operator is told to run `migrate-roots --session-id ID` and not told which
+    ID, which in a multi-session history means finding it by hand.
     """
     frontmatter, _ = parse_frontmatter(text)
     repo_root = frontmatter.get("repo_root")
@@ -288,7 +294,13 @@ def canonicalize_document(text: str) -> str:
         raise VaultError("archive has no usable repo_root")
     if not isinstance(project_root, str) or not project_root:
         raise VaultError("archive has no usable project_root")
-    offset = contained_offset(project_root, repo_root)
+    try:
+        offset = contained_offset(project_root, repo_root)
+    except VaultError as exc:
+        session_id = frontmatter.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise
+        raise VaultError(f"session {session_id}: {exc}") from exc
     canonical_project = VAULT_ROOT_TOKEN if offset == "" else f"{VAULT_ROOT_TOKEN}/{offset}"
     return _replace_root_scalars(text, VAULT_ROOT_TOKEN, canonical_project)
 
