@@ -8,6 +8,7 @@ proven by the harness rather than asserted in prose.
 from __future__ import annotations
 
 import os
+import pathlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -2634,3 +2635,184 @@ def test_an_unreadable_artifact_refuses_before_any_move(
     assert "nothing was moved" in output.err
     assert list((checkout / ".agent-history").glob("quarantine-*")) == []
     assert _history_bytes(checkout) == before
+
+
+@pytest.mark.parametrize("transport", ["folder", "git"])
+def test_a_cleanup_failure_is_actionable_and_stops_nothing(
+    tmp_path, checkout, clone, monkeypatch, capsys, transport
+):
+    """#127 AC1/AC2/AC4: the emptied-quarantine `rmdir` is cleanup, not restoration.
+
+    `rmdir` runs last in `restore_quarantined`, after every archive is already
+    back — so failing it here is failing *only* the cleanup. It used to escape:
+    the operator got a raw traceback instead of the handled recovery error, and
+    the artifact and sync-state restoration at the next line never ran, leaving
+    derived local state changed by a transaction that had failed.
+
+    Asserted as whole-history byte identity rather than by naming the artifacts
+    that used to differ. #126 shrank that set from `INDEX.yaml` + `VAULT-SYNC.yaml`
+    to `INDEX.yaml` alone, and a control that enumerates files rots into a false
+    failure the next time the set changes (RE2, on this ticket).
+    """
+    flag, target = _vault_with_a_unique_archive(tmp_path, transport, clone)
+    _duplicate_archive(checkout, "000-earlier")
+    before = _history_bytes(checkout)
+    real_write = vault.write_sync_state
+
+    def mutate_then_raise(*args, **kwargs):
+        real_write(*args, **kwargs)
+        raise vault.VaultError("injected primary failure")
+
+    real_rmdir = pathlib.Path.rmdir
+
+    def rmdir_only_the_quarantine(self, *a, **k):
+        # Scoped to the quarantine so this fails *after* archive restoration and
+        # nowhere else: any other rmdir in the run behaves normally.
+        if self.name.startswith("quarantine-"):
+            raise OSError(13, "Permission denied")
+        return real_rmdir(self, *a, **k)
+
+    monkeypatch.setattr(vault, "write_sync_state", mutate_then_raise)
+    monkeypatch.setattr(pathlib.Path, "rmdir", rmdir_only_the_quarantine)
+    capsys.readouterr()
+
+    rc = _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", flag, str(target), "--apply",
+    )
+    err = capsys.readouterr().err
+
+    assert rc == cli.EXIT_ERROR, "the cleanup failure escaped as a traceback"
+    assert "injected primary failure" in err, "the original failure was replaced"
+    assert "could not be removed" in err, "the cleanup failure was not reported"
+    assert "does not affect what was restored" in err, (
+        "a retained empty quarantine was reported as an inexact restoration"
+    )
+    assert "could not restore" not in err, (
+        "cleanup was folded into the restore-failure categories"
+    )
+
+    quarantines = list((checkout / ".agent-history").glob("quarantine-*"))
+    assert len(quarantines) == 1, "the empty quarantine should remain for the operator"
+    assert list(quarantines[0].iterdir()) == [], "nothing should be left inside it"
+    assert _history_bytes(checkout) == before, (
+        "the cleanup failure skipped the remaining restoration"
+    )
+
+
+@pytest.mark.parametrize("transport", ["folder", "git"])
+def test_a_cleanup_inspection_failure_claims_no_emptiness(
+    tmp_path, checkout, clone, monkeypatch, capsys, transport
+):
+    """#127 AC1/AC2: the cleanup can fail *before* emptiness is established.
+
+    `is_dir()` and the enumeration raise on a parent whose permissions changed,
+    exactly as `rmdir()` does — so they belong inside the same handler. But an
+    enumeration that failed has established nothing, and the removal-failure
+    wording ("it is empty, so this does not affect what was restored") would then
+    be a guess printed as a fact. It is wrong in the one case that matters: a
+    directory still holding an archive that never went back, reported as
+    harmless (@re1, PR #130).
+    """
+    flag, target = _vault_with_a_unique_archive(tmp_path, transport, clone)
+    _duplicate_archive(checkout, "000-earlier")
+    before = _history_bytes(checkout)
+    real_write = vault.write_sync_state
+
+    def mutate_then_raise(*args, **kwargs):
+        real_write(*args, **kwargs)
+        raise vault.VaultError("injected primary failure")
+
+    real_iterdir = pathlib.Path.iterdir
+
+    def iterdir_fails_on_the_quarantine(self, *a, **k):
+        if self.name.startswith("quarantine-"):
+            raise OSError(13, "Permission denied")
+        return real_iterdir(self, *a, **k)
+
+    monkeypatch.setattr(vault, "write_sync_state", mutate_then_raise)
+    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir_fails_on_the_quarantine)
+    capsys.readouterr()
+
+    rc = _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", flag, str(target), "--apply",
+    )
+    err = capsys.readouterr().err
+
+    assert rc == cli.EXIT_ERROR, "the inspection failure escaped as a traceback"
+    assert "injected primary failure" in err, "the original failure was replaced"
+    assert "could not be inspected" in err, "the cleanup failure was not reported"
+    assert "whether anything remains inside it is unknown" in err
+    assert "it is empty" not in err, "emptiness was claimed without being established"
+    assert "does not affect what was restored" not in err, (
+        "an unverified directory was reported as harmless"
+    )
+    assert "could not restore" not in err, (
+        "cleanup was folded into the restore-failure categories"
+    )
+    assert _history_bytes(checkout) == before, (
+        "the inspection failure skipped the remaining restoration"
+    )
+
+
+def test_a_collision_and_an_inspection_failure_do_not_contradict(
+    tmp_path, checkout, clone, monkeypatch, capsys
+):
+    """#127 AC2: the case that makes the emptiness claim material, not pedantic.
+
+    A restore collision leaves a copy in the quarantine, so the directory really
+    is occupied. If the enumeration then fails, the pre-fix wording put two
+    contradictory sentences in one error: one line says a copy is kept under the
+    quarantine, the next says the quarantine is empty and its retention affects
+    nothing. An operator who believes the second stops looking for the first —
+    which is worse than the traceback this ticket replaces, because a traceback
+    at least says nothing untrue (RE2, PR #130).
+    """
+    flag, target = _vault_with_a_unique_archive(tmp_path, "folder", clone)
+    _duplicate_archive(checkout, "000-earlier")
+    sessions = checkout / ".agent-history" / SESSIONS_DIRNAME
+    real_write = vault.write_sync_state
+
+    def occupy_then_raise(*args, **kwargs):
+        # An external file at a quarantined archive's own path: unrecorded, so
+        # #93 forbids replacing it, so the quarantined copy stays put and the
+        # directory is genuinely non-empty when the cleanup runs.
+        (sessions / "000-earlier.md").write_bytes(b"an operator's own file\n")
+        real_write(*args, **kwargs)
+        raise vault.VaultError("injected primary failure")
+
+    real_iterdir = pathlib.Path.iterdir
+
+    def iterdir_fails_on_the_quarantine(self, *a, **k):
+        if self.name.startswith("quarantine-"):
+            raise OSError(13, "Permission denied")
+        return real_iterdir(self, *a, **k)
+
+    monkeypatch.setattr(vault, "write_sync_state", occupy_then_raise)
+    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir_fails_on_the_quarantine)
+    capsys.readouterr()
+
+    rc = _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", flag, str(target), "--apply",
+    )
+    err = capsys.readouterr().err
+    # Before inspecting the tree: the patch that made the command's enumeration
+    # fail would make this test's own enumeration fail too.
+    monkeypatch.undo()
+
+    assert rc == cli.EXIT_ERROR
+    assert "the quarantined copy is kept under" in err, "the collision was not reported"
+    assert "it is empty" not in err, (
+        "the error says a copy is kept in the quarantine and that the quarantine is empty"
+    )
+    assert "does not affect what was restored" not in err, (
+        "a quarantine holding an unrestored copy was reported as harmless"
+    )
+    assert "whether anything remains inside it is unknown" in err
+    quarantines = list((checkout / ".agent-history").glob("quarantine-*"))
+    assert len(quarantines) == 1
+    assert [p.name for p in quarantines[0].iterdir()] == ["000-earlier.md"], (
+        "the fixture must leave the quarantine genuinely occupied"
+    )

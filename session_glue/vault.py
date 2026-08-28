@@ -1365,15 +1365,37 @@ class RestoreOutcome:
     and it recurred once inside the split's own introduction — which is why each
     cause is defined by what happened, never by what is at the path.
 
-    None is a silent skip — every one is reported, and any of them means the
-    result is not an exact restoration.
+    None is a silent skip — every one is reported, and any of **those three**
+    means the result is not an exact restoration.
+
+    ``cleanup_failed`` is deliberately **not** a fourth cause of that kind, and
+    the scoping above is deliberate too (#127). It records that the quarantine
+    directory could not be cleaned up — a tidying step that runs after every
+    archive is already back. A retained *empty* directory cannot un-restore
+    anything, so folding it into the three would print "this is not an exact
+    restoration" about a restoration that was exact. That is the same collapse
+    the three-way split exists to prevent, one level out: a cause defined by
+    what happened, not by what is left on disk.
+
+    ``cleanup_verified_empty`` says whether the directory was **observed** empty
+    before the removal was attempted, and exists because the reassuring half of
+    that wording has to be earned. The cleanup can fail at the enumeration as
+    well as at the removal, and an enumeration that failed established nothing:
+    reporting "it is empty, so this does not affect what was restored" about a
+    directory nobody could read would be a guess printed as a fact — and wrong
+    in the one case that matters, where what remains inside is an archive that
+    never went back.
     """
 
     collisions: list[str]
     unrestorable: list[str]
     failed: list[str]
+    cleanup_failed: str | None = None
+    cleanup_verified_empty: bool = False
 
     def __bool__(self) -> bool:
+        # Restoration outcomes only. Truthiness answers "is anything not back?",
+        # and a directory we could not remove is not an answer to that question.
         return bool(self.collisions or self.unrestorable or self.failed)
 
 
@@ -1382,8 +1404,6 @@ def _recovery_outcome_detail(outcome: "RestoreOutcome", quarantine: Path) -> str
 
     Empty when everything went back, so the caller's own error reads cleanly.
     """
-    if not outcome:
-        return "; active archives were restored"
     parts = []
     if outcome.collisions:
         parts.append(
@@ -1403,7 +1423,26 @@ def _recovery_outcome_detail(outcome: "RestoreOutcome", quarantine: Path) -> str
             "could not restore (the restoration operation failed, so this is not "
             "an exact restoration): " + ", ".join(outcome.failed)
         )
-    return "; " + "; ".join(parts)
+    detail = "; " + "; ".join(parts) if parts else "; active archives were restored"
+    if outcome.cleanup_failed is not None:
+        # Appended rather than folded in, and worded so it cannot be read as a
+        # restoration problem: it follows an exact-restoration line without
+        # contradicting it (#127).
+        if outcome.cleanup_verified_empty:
+            detail += (
+                f"; the emptied quarantine directory could not be removed and "
+                f"remains at {quarantine} ({outcome.cleanup_failed}) — it is "
+                "empty, so this does not affect what was restored"
+            )
+        else:
+            # Occupancy-neutral: emptiness was never established, so this says
+            # what happened and what is unknown, and claims nothing else.
+            detail += (
+                f"; the quarantine directory at {quarantine} could not be "
+                f"inspected ({outcome.cleanup_failed}), so whether anything "
+                "remains inside it is unknown; check it before removing it"
+            )
+    return detail
 
 
 def snapshot_local_artifacts(repo_root: Path | str) -> dict[str, bytes | None]:
@@ -1684,10 +1723,28 @@ def restore_quarantined(
             # abandoned every archive after it in the loop — leaving active
             # history empty with no report at all (#124).
             failed.append(relative_path)
-    if quarantine.is_dir() and not any(quarantine.iterdir()):
-        quarantine.rmdir()
+    cleanup_failed: str | None = None
+    cleanup_verified_empty = False
+    try:
+        if quarantine.is_dir() and not any(quarantine.iterdir()):
+            # Emptiness is established *here* and nowhere else. A failure before
+            # this line — `is_dir` or the enumeration itself — leaves occupancy
+            # unknown, and the report may not claim otherwise (@re1, PR #130).
+            cleanup_verified_empty = True
+            quarantine.rmdir()
+    except OSError as exc:
+        # Cleanup, not restoration (#127). Escaping here replaced the caller's
+        # actionable error with a raw traceback *and* skipped the artifact and
+        # sync-state restoration that still had to run, so a failure to remove an
+        # empty directory left the derived local state changed. Nothing is forced
+        # to make the removal succeed: the directory stays, and is reported.
+        cleanup_failed = str(exc)
     return RestoreOutcome(
-        collisions=collisions, unrestorable=unrestorable, failed=failed
+        collisions=collisions,
+        unrestorable=unrestorable,
+        failed=failed,
+        cleanup_failed=cleanup_failed,
+        cleanup_verified_empty=cleanup_verified_empty,
     )
 
 
