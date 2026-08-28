@@ -8,6 +8,8 @@ useful standard anywhere in this module.
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 
 from session_glue import schema, validator, vault, writer
@@ -890,42 +892,271 @@ def test_decisions_read_refuses_rather_than_silently_reading_empty(tmp_path, syn
         vault.export_project(root, vault_root, "alpha")
 
 
-def test_every_vault_helper_reaching_the_filesystem_guards_containment():
-    """AC5: a sweep, not a checklist — the criterion is that no helper opts out.
+def test_pull_refuses_a_symlinked_local_history_root(tmp_path, synced):
+    """The gap the AC5 sweep surfaced: `.agent-history` was created before it was checked.
 
-    Asserted against the module source so a *new* helper that reads or writes
-    without a guard fails this test, which is the difference between closing the
-    class and closing the six sites that were cited.
+    `import_project` ran `history_dir.mkdir(parents=True, exist_ok=True)` and
+    only reached a containment guard later, inside `LocalWrite.commit`. A
+    symlinked `.agent-history` pointing at an existing directory makes that
+    `mkdir` a silent no-op rather than an error, so the redirected root survived
+    until the first write.
+
+    Nothing leaked either way — `commit` refuses before any byte lands, which is
+    why this test passes without the guard too. It is here to pin the ordering,
+    and it is the behavioural half of a finding the sweep makes structurally.
+    """
+    root, vault_root = synced
+    external = tmp_path / "elsewhere"
+    external.mkdir()
+    history = root / writer.AGENT_HISTORY_DIRNAME
+    shutil.rmtree(history)
+    history.symlink_to(external)
+
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.import_project(root, vault_root, "alpha")
+
+    assert list(external.iterdir()) == []
+
+
+#: Filesystem verbs that read or write content or structure. Existence probes
+#: (`exists`, `is_file`, `is_dir`, `is_symlink`) are excluded deliberately: they
+#: leak no content and including them would drown the signal.
+_FS_VERBS = frozenset({
+    "read_text", "write_text", "read_bytes", "write_bytes",
+    "iterdir", "glob", "rglob", "walk",
+    "mkdir", "rmdir", "unlink", "rename", "replace", "touch", "symlink_to",
+    "open", "hardlink_to", "chmod", "copy", "copytree", "move",
+})
+
+#: Calls that establish containment for the path handed to them. Each takes the
+#: path it proves as one of its arguments, which is what lets the sweep match a
+#: guard to a *target* rather than merely to a function body.
+_GUARD_CALLS = frozenset({
+    "guard_contained_path", "_prepare_target", "_write_recorded",
+    "_read_text", "reject_symlink", "assert_within",
+})
+
+#: Functions that reach the filesystem without a guard *by design*. Each entry
+#: is a claim someone must defend at review; an empty reason is not accepted.
+_UNGUARDED_BY_DESIGN = {
+    "Creations.undo": (
+        "deletes only paths recorded during a guarded write, so every target "
+        "was proven contained on the way in"
+    ),
+}
+
+
+def _target_expression(source, call):
+    """The path expression a filesystem call acts on, or None.
+
+    `p.write_text(...)` acts on `p`; a bare `open(p)` acts on its first
+    argument. Trailing `.parent` hops are stripped because a guard on `p` proves
+    every ancestor of `p` too -- that is exactly `guard_contained_path`'s
+    contract -- so `p.parent.mkdir()` is covered by a guard naming `p`.
+    """
+    import ast
+
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        node = func.value
+    elif call.args:
+        node = call.args[0]
+    else:
+        return None
+    while isinstance(node, ast.Attribute) and node.attr == "parent":
+        node = node.value
+    return _normalize(ast.get_source_segment(source, node))
+
+
+def _normalize(text):
+    """Collapse `Path(x)` to `x` so the two spellings of one path compare equal."""
+    if text is None:
+        return None
+    text = " ".join(text.split())
+    while text.startswith("Path(") and text.endswith(")"):
+        inner = text[len("Path("):-1]
+        if inner.count("(") != inner.count(")"):
+            break
+        text = inner.strip()
+    return text
+
+
+def unguarded_fs_targets(source):
+    """Every filesystem target in *source* not proven contained before it is touched.
+
+    Closed by default: each filesystem call must be preceded, in the same
+    function body, by a guard call that names *that* target. Presence of some
+    guard elsewhere in the body is not enough -- that is the hole this replaced,
+    where one guarded path excused a second unguarded one.
+
+    Returns `(offenders, allowlisted_but_guarded)`.
+    """
+    import ast
+
+    tree = ast.parse(source)
+    parents = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    def qualname(node):
+        parent = parents.get(node)
+        while parent is not None:
+            if isinstance(parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                return f"{parent.name}.{node.name}"
+            parent = parents.get(parent)
+        return node.name
+
+    offenders, stale = [], []
+    for node in ast.walk(tree):
+        # Methods are walked exactly like module functions: every raw byte-level
+        # operation in vault.py lives on a class, so a sweep that missed them
+        # would miss the calls that matter most.
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        name = qualname(node)
+
+        proven = []   # (lineno, normalized target expression)
+        touches = []  # (lineno, verb, normalized target expression)
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call):
+                continue
+            func = child.func
+            called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if called in _GUARD_CALLS:
+                proven.extend(
+                    (child.lineno, _normalize(ast.get_source_segment(source, arg)))
+                    for arg in child.args
+                )
+            if called in _FS_VERBS:
+                touches.append((child.lineno, called, _target_expression(source, child)))
+
+        if not touches:
+            continue
+        if name in _UNGUARDED_BY_DESIGN:
+            if proven:
+                stale.append(name)
+            continue
+        for lineno, verb, target in touches:
+            # `<= lineno`: a guard on the same line still runs first, and a guard
+            # *after* the call it is meant to protect does not count -- writing
+            # then checking is the ordering bug this catches.
+            if not any(at <= lineno and expr == target for at, expr in proven):
+                offenders.append(f"{name} touches {target or '?'} via .{verb}() at line {lineno}")
+    return offenders, stale
+
+
+def test_every_vault_helper_reaching_the_filesystem_guards_containment():
+    """AC5: closed by default -- a new unguarded filesystem target fails this test.
+
+    Walks the module AST rather than matching substrings, so it sees class
+    methods as well as module functions, cannot be fooled by a name that merely
+    contains a verb, and does not let one guarded path in a body excuse an
+    unguarded second one.
+
+    **What it does not prove**, stated because a sweep that overstates itself is
+    worse than none:
+
+    * It matches guards to targets *syntactically*. A guard whose containment
+      root is the wrong root still satisfies it; only the behavioural symlink
+      tests above catch that.
+    * `_FS_VERBS` is a closed list of names. A filesystem call through a verb
+      nobody has thought of -- a new stdlib helper, an aliased method -- is
+      invisible until the name is added here.
+    * It reasons per function body, so a path laundered through an unguarded
+      helper that this sweep clears for other reasons is not traced across the
+      call boundary.
     """
     import inspect
 
-    source = inspect.getsource(vault)
-    functions = [
-        obj
-        for name, obj in vars(vault).items()
-        if inspect.isfunction(obj) and obj.__module__ == vault.__name__
-    ]
-    # Dotted forms only: `_read_text(...)` is itself a guarded helper, and
-    # matching the bare substring would flag every function that delegates to it.
-    touches_fs = (
-        ".read_text(", ".write_text(", ".read_bytes(", ".write_bytes(",
-        ".iterdir(", ".glob(", ".mkdir(", ".unlink(",
-    )
-    guards = (
-        "guard_contained_path", "reject_symlink", "_prepare_target",
-        "_write_recorded", "_read_text(",
-    )
+    offenders, stale = unguarded_fs_targets(inspect.getsource(vault))
+    assert offenders == [], "unguarded filesystem access in vault.py: " + "; ".join(offenders)
+    assert stale == [], f"these are guarded now, remove them from the allowlist: {stale}"
+    assert all(_UNGUARDED_BY_DESIGN.values()), "every allowlist entry needs a stated reason"
 
-    unguarded = []
-    for func in functions:
-        body = inspect.getsource(func)
-        if any(call in body for call in touches_fs) and not any(g in body for g in guards):
-            unguarded.append(func.__name__)
 
-    # `render_*`/`parse_*` helpers never touch the filesystem, so they are absent
-    # by construction rather than by exclusion list.
-    assert unguarded == [], f"vault helpers reach the filesystem unguarded: {unguarded}"
-    assert "guard_contained_path" in source
+#: Each case is source the sweep *must* flag, paired with why it would have
+#: slipped through the substring version this replaced. These are the sweep's
+#: own regression tests: without them "the sweep is closed by default" is a
+#: claim about a test, asserted nowhere.
+_MUST_BE_FLAGGED = {
+    "a new unguarded helper": """
+def _future_helper(path):
+    return path.read_text()
+""",
+    # The hole that made the previous sweep a checklist: it asked only whether
+    # *a* guard appeared somewhere in the body.
+    "a second target left unguarded beside a guarded one": """
+def _mixed(root, wanted, other):
+    guard_contained_path(root, wanted)
+    first = wanted.read_text()
+    return first + other.read_text()
+""",
+    # `inspect.isfunction` over module vars never saw these.
+    "an unguarded class method": """
+class Writer:
+    def commit(self, target):
+        target.write_bytes(b"x")
+""",
+    # #93 stages replacement writes with `os.replace`; the old verb list would
+    # not have matched it.
+    "a replacement write": """
+def _swap(staged, target):
+    os.replace(staged, target)
+""",
+    "a directory removal": """
+def _prune(directory):
+    directory.rmdir()
+""",
+    # Checking after touching is this repo's recurring shape, so the sweep is
+    # ordered rather than set-based.
+    "a guard placed after the write it protects": """
+def _late(root, target):
+    target.write_text("x")
+    guard_contained_path(root, target)
+""",
+}
+
+#: Source the sweep must *not* flag. A check that fires on everything closes
+#: nothing, and two of these encode contracts the real module depends on.
+_MUST_BE_CLEAN = {
+    "a guarded read": """
+def _fine(root, target):
+    guard_contained_path(root, target)
+    return target.read_text()
+""",
+    # `guard_contained_path` proves the whole ancestry, so a guard on the leaf
+    # covers its parent -- which is how `_prepare_target` and `write_sync_state`
+    # are written.
+    "a parent derived from a guarded target": """
+def _fine(root, target):
+    guard_contained_path(root, target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+""",
+    # `p.relative_to(p)` has no parts, so `guard_contained_path(p, p)` reduces
+    # to the root symlink check -- exact, not a special case.
+    "a path guarded as its own root": """
+def _fine(path):
+    guard_contained_path(path, path)
+    return any(path.iterdir())
+""",
+    "an existence probe": """
+def _fine(path):
+    return path.exists() and path.is_symlink()
+""",
+}
+
+
+@pytest.mark.parametrize("case", sorted(_MUST_BE_FLAGGED))
+def test_the_containment_sweep_flags_what_it_claims_to(case):
+    offenders, _ = unguarded_fs_targets(_MUST_BE_FLAGGED[case])
+    assert offenders, f"the sweep missed {case}, so it does not close the class"
+
+
+@pytest.mark.parametrize("case", sorted(_MUST_BE_CLEAN))
+def test_the_containment_sweep_accepts_a_properly_guarded_body(case):
+    offenders, _ = unguarded_fs_targets(_MUST_BE_CLEAN[case])
+    assert offenders == [], f"the sweep wrongly flagged {case}: {offenders}"
 
 
 def test_resolve_refuses_a_symlinked_conflicts_source(tmp_path, synced):

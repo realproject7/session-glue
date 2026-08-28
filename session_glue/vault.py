@@ -981,12 +981,14 @@ def read_state_local(repo_root: Path | str) -> dict[str, Any]:
 
 def _namespace_is_empty(namespace: Path) -> bool:
     """True when ``projects/<id>/`` is absent or holds nothing."""
-    from . import writer
-
     path = Path(namespace)
-    # The namespace *is* the root here, so `guard_contained_path`'s relative
-    # form does not apply; its ancestry is already proven in `project_dir`.
-    writer.reject_symlink(path)
+    # The namespace is its own root here. `guard_contained_path(p, p)` is exact
+    # rather than a special case: `p.relative_to(p)` is `.` with no parts, so the
+    # ancestor loop does not run and only the root check fires — which is the
+    # whole check when the target *is* the root. Spelling it this way keeps every
+    # containment call in this module one function, so none can be mistaken for
+    # the leaf-only shape #88 removes.
+    guard_contained_path(path, path)
     if not path.exists():
         return True
     return not any(path.iterdir())
@@ -1245,6 +1247,11 @@ def import_project(repo_root: Path | str, vault_root: Path | str, project_id: st
     )
 
     history_dir = root / writer.AGENT_HISTORY_DIRNAME
+    # Before the mkdir, not after: `LocalWrite.commit` does guard this root, but
+    # only once a write is already in flight. A symlinked `.agent-history` makes
+    # `mkdir(exist_ok=True)` a silent success, so the check that would catch it
+    # belongs ahead of the first call that touches the path.
+    guard_contained_path(root, history_dir)
     history_dir.mkdir(parents=True, exist_ok=True)
     write = LocalWrite(history_dir)
     for path, text in materialized.items():
