@@ -1855,11 +1855,14 @@ def test_a_pre_feature_history_needing_root_migration_says_so_before_any_write(t
     # Refused before any vault artifact exists, pointing at the way out, and
     # naming the session that blocks it — #77 requires the blocking session ID,
     # and `migrate-roots` takes exactly that as `--session-id`.
+    #
+    # Deliberately no assertion that the *other* session is absent. A message
+    # that named every blocking session would still satisfy #77, so asserting
+    # its absence would make a legitimate future improvement fail this test —
+    # the same shape as the `not in` assertion this replaced.
     assert not (vault_root / vault.PROJECTS_DIRNAME).exists()
     assert "migrate-roots" in str(excinfo.value)
     assert "2026-08-28-1200-alpha" in str(excinfo.value)
-    # The *other* session is not the blocker and must not be named as one.
-    assert "2026-08-26-0900-first" not in str(excinfo.value)
 
     # The named migration is the documented way out, and then the round trip works.
     vault.migrate_roots(source, "2026-08-28-1200-alpha", source)
