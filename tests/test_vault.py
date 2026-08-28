@@ -2447,7 +2447,13 @@ def test_migrate_roots_still_accepts_a_repository_reached_through_a_symlink(tmp_
     relative = vault.migrate_roots(repo, "2026-08-28-1200-alpha", nested)
 
     rewritten = (repo / ".agent-history" / relative).read_text(encoding="utf-8")
-    assert f"project_root: {nested}" in rewritten
+    # Parsed, not matched as a raw substring: this scalar is a *native* path, and
+    # on Windows the serializer quotes it and escapes every separator, so
+    # `project_root: C:\a\b` never appears literally. The canonical-form
+    # assertions elsewhere in this file can match raw text because
+    # `<vault-root>/…` is forward-slash by construction and unquoted.
+    frontmatter, _ = schema.parse_frontmatter(rewritten)
+    assert frontmatter["project_root"] == str(nested)
 
 
 @pytest.mark.parametrize(
