@@ -200,12 +200,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     install = subparsers.add_parser(
         "install",
-        help="Show the managed instruction block for a coding agent (dry-run only).",
+        help=(
+            "Superseded by 'glue skill install'; prints the managed instruction "
+            "block for a coding agent (dry-run only)."
+        ),
         description=(
-            "Dry-run only: print the target instruction file and the managed "
-            "Session Glue block that would be added for a coding agent. Never "
-            "modifies user-home files; real installation is not implemented "
-            "(operator-gated)."
+            "Superseded by 'glue skill install' and print-only: this prints the "
+            "target instruction file and the managed Session Glue block that "
+            "would be added for a coding agent. Never modifies user-home files; "
+            "real installation is not implemented (operator-gated). The block "
+            "describes the handoff contract the current schema accepts, so a "
+            "pasted block stays usable."
         ),
     )
     install.add_argument(

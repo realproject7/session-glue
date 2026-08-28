@@ -8,6 +8,13 @@ not implemented here (operator-gated).
 
 The managed block is delimited by stable begin/end markers so a future updater
 can replace it idempotently, and so existing installs can be detected.
+
+The block's step 1 describes the handoff contract an agent must produce, so it
+has to name every field in :data:`schema.REQUIRED_FIELDS` and every heading in
+:data:`schema.REQUIRED_BODY_SECTIONS`. It drifted out of alignment once (#90),
+advertising a shape the validator rejects; ``tests/test_installer.py`` now
+derives its expectations from those constants, so a schema change fails the
+guidance tests instead of silently reintroducing the drift.
 """
 
 from __future__ import annotations
@@ -27,13 +34,28 @@ _BLOCK_BODY = """\
 When the user runs `/glue`, `/freeze`, `/handoff`, or `/checkpoint`, or asks in
 natural language to glue / freeze / checkpoint / hand off the current session:
 
-1. Compose a handoff document: YAML frontmatter (session_id, session_date,
-   generated_at, schema_version, project_root, repo_root, current_branch,
-   head_commit, agent, status, active_context_files, completed_tasks,
-   next_todo_items, known_issues) plus a narrative body covering what changed,
-   what is still broken, and what to do next. `next_todo_items[0]` MUST be the
-   first productive work item, never a resume mechanic (do not write "read
-   LATEST.md", "paste the prompt", "start a new session", etc.).
+1. Compose a handoff document: YAML frontmatter followed by a narrative body.
+
+   Every frontmatter field is required: session_id, session_date, generated_at,
+   schema_version, project_root, repo_root, current_branch, head_commit, agent,
+   status, primary_goal, active_context_files, completed_tasks, next_todo_items,
+   known_issues, search_tags, validation.
+
+   Every body heading is required, written exactly as shown at the top level.
+   The prose beneath each one is never inspected, but the heading must be there:
+
+     # Resume Prompt
+     # What We Did
+     # Current State
+     # Decisions Made
+     # Failed Attempts / Dead Ends
+     # Next-Agent Instructions
+     # Commands And Validation
+     # Risks And Constraints
+
+   `next_todo_items[0]` MUST be the first productive work item, never a resume
+   mechanic (do not write "read LATEST.md", "paste the prompt", "start a new
+   session", etc.).
 2. Run `glue create` to write the handoff into the repository-local
    `.agent-history/` directory (LATEST.md, RESUME_PROMPT.txt, INDEX.yaml, and
    sessions/<id>.md). Optionally run `glue validate` to check it.
