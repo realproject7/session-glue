@@ -16,3 +16,4 @@ build/
 .agent-history/
 /docs/*
 !/docs/agent-surfaces.md
+!/docs/personal-vault-audit.md
