@@ -8,6 +8,7 @@ useful standard anywhere in this module.
 
 from __future__ import annotations
 
+import pathlib
 import shutil
 
 import pytest
@@ -969,6 +970,11 @@ _GUARD_CALLS = frozenset({
 #: values through containers, so it cannot see that -- a limit, stated here
 #: rather than papered over.
 _UNGUARDED_BY_DESIGN = {
+    ("Creations.restore", "write_bytes", "target"): (
+        1,
+        "rollback path (#93): restores the bytes of a target `_write_recorded` "
+        "proved contained via `_prepare_target` before it displaced them",
+    ),
     ("Creations.undo", "unlink", "target"): (
         1, "removes only files recorded during a guarded write"
     ),
@@ -2117,3 +2123,235 @@ def test_published_content_is_exactly_the_gated_set_plus_two_named_exemptions(
     assert vault.DECISIONS_FILENAME in gated, "a changed decision must reach the gate"
     ungated = published - set(gated)
     assert ungated == set(), f"published without ever reaching the privacy gate: {ungated}"
+
+
+# --------------------------------------------------------------------------- #
+# Issue #93 — a failed folder publication cannot make truncated bytes authoritative
+# --------------------------------------------------------------------------- #
+
+
+def _vault_snapshot(namespace):
+    """Every file under the namespace and its exact bytes."""
+    return {
+        path.relative_to(namespace).as_posix(): path.read_bytes()
+        for path in namespace.rglob("*")
+        if path.is_file()
+    }
+
+
+def _tear_write_at(monkeypatch, matches, keep=lambda text: text[:40]):
+    """Fail a publication write partway, leaving `keep(text)` behind.
+
+    Patches `Path.write_text` rather than adding a production seam: the point is
+    that the *filesystem* write dies mid-way, which no parameter of ours can
+    honestly simulate. `matches` selects which target tears so a test can aim at
+    an archive rather than at whichever file happens to be written first.
+    """
+    real = pathlib.Path.write_text
+    fired = []
+
+    def torn(self, data, **kwargs):
+        if matches(self):
+            fired.append(self.name)
+            real(self, keep(data), **kwargs)
+            raise OSError("simulated disk-full mid-write")
+        return real(self, data, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", torn)
+    return fired
+
+
+def _is_vault_archive(path):
+    return path.suffix in (".md", ".partial") and "sessions" in str(path) and "projects" in str(path)
+
+
+def _body_only(text):
+    """Truncate after the frontmatter, keeping it fully parseable — #82's case."""
+    return text[: text.index("---", text.index("---") + 3) + 20]
+
+
+@pytest.fixture()
+def diverged(tmp_path, checkout):
+    """A vault whose archive differs, so `resolve` must *replace* it."""
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    vault.export_project(checkout, vault_root, "alpha")
+    _diverge(vault_root)
+    return checkout, vault_root, vault_root / "projects" / "alpha"
+
+
+def test_a_body_only_truncation_during_resolve_never_becomes_authoritative(
+    diverged, monkeypatch
+):
+    """AC1: the exact #82 finding, which the referenced-archive check cannot catch.
+
+    A truncation that keeps the whole frontmatter still parses, so
+    `require_referenced_archives` reports the archive as present and the
+    surviving state/marker make the partial bytes authoritative — another device
+    then pulls them. Verified on the pre-#93 code: the check passed and a pull
+    materialized the truncated archive.
+    """
+    root, vault_root, namespace = diverged
+    before = _vault_snapshot(namespace)
+    fired = _tear_write_at(monkeypatch, _is_vault_archive, keep=_body_only)
+
+    with pytest.raises(OSError, match="simulated disk-full"):
+        vault.resolve_project(
+            root, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
+        )
+
+    assert fired, "the seam never reached an archive write; the test proves nothing"
+    assert _vault_snapshot(namespace) == before
+    # The guarantee restated the way #82 framed it: not merely "bytes restored",
+    # but that nothing authoritative points at partial content.
+    vault.require_referenced_archives(namespace, vault.read_state(namespace))
+
+
+def test_a_mid_write_failure_during_push_leaves_the_vault_exactly_as_it_was(
+    tmp_path, checkout, monkeypatch
+):
+    """AC2/AC4: the same seam on the push path, where state and marker are replaced."""
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    vault.export_project(checkout, vault_root, "alpha")
+    namespace = vault_root / "projects" / "alpha"
+    _write_history(checkout, session_id="2026-08-29-0900-second")
+    before = _vault_snapshot(namespace)
+
+    fired = _tear_write_at(monkeypatch, lambda p: "vault-state" in p.name)
+    with pytest.raises(OSError, match="simulated disk-full"):
+        vault.export_project(checkout, vault_root, "alpha")
+
+    assert fired
+    assert _vault_snapshot(namespace) == before
+    assert vault.read_sync_state(checkout)  # the baseline never advanced past it
+
+
+def test_a_partial_set_failure_restores_every_archive_already_replaced(
+    diverged, monkeypatch
+):
+    """AC2: partial-set failure, distinct from a torn single write.
+
+    `fault_after` stops the publication cleanly between targets, so earlier ones
+    were fully replaced with new bytes. Restoring them is the half `Creations`
+    could not do before #93 — it removed created files and left displaced ones.
+    """
+    root, vault_root, namespace = diverged
+    before = _vault_snapshot(namespace)
+    real_publish = vault._publish
+    monkeypatch.setattr(
+        vault, "_publish", lambda *a, **k: real_publish(*a, **{**k, "fault_after": 1})
+    )
+
+    with pytest.raises(vault.VaultError, match="injected publication fault"):
+        vault.resolve_project(
+            root, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
+        )
+
+    assert _vault_snapshot(namespace) == before
+
+
+def test_no_staging_sibling_survives_a_failed_publication(diverged, monkeypatch):
+    """AC1 asks for the exact file *set*: a half-written sibling is a new file."""
+    root, vault_root, namespace = diverged
+    _tear_write_at(monkeypatch, _is_vault_archive, keep=_body_only)
+
+    with pytest.raises(OSError):
+        vault.resolve_project(
+            root, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
+        )
+
+    assert list(namespace.rglob("*" + vault.STAGING_SUFFIX)) == []
+
+
+def test_a_caller_supplied_record_still_owns_its_own_rollback(diverged, monkeypatch):
+    """AC3/#87: passing `created` must keep the caller in charge, as Git needs.
+
+    Git sequences `created.undo()` against a `git reset --hard`, so `_publish`
+    undoing on its own would double-recover. This pins that the folder-mode
+    rollback added by #93 is conditional, not unconditional.
+    """
+    root, vault_root, namespace = diverged
+    record = vault.Creations()
+    archive = next((namespace / vault.SESSIONS_DIRNAME).glob("*.md"))
+    original = archive.read_bytes()
+
+    _tear_write_at(monkeypatch, _is_vault_archive, keep=_body_only)
+    with pytest.raises(OSError):
+        vault.resolve_project(
+            root, vault_root, "alpha", SESSION,
+            archive_choices={SESSION: "local"}, created=record,
+        )
+
+    # Not rolled back by `_publish` — but recorded, so the caller can.
+    assert record.replaced, "nothing recorded for the caller to restore"
+    record.restore()
+    assert archive.read_bytes() == original
+
+
+def _staging_lookalike(namespace):
+    """A file an operator (or a killed run) left where staging wants to write."""
+    archive = next((namespace / vault.SESSIONS_DIRNAME).glob("*.md"))
+    sibling = archive.with_name(archive.name + vault.STAGING_SUFFIX)
+    sibling.write_bytes(b"operator's notes, not ours\n")
+    return sibling
+
+
+def test_a_pre_existing_staging_sibling_survives_a_failed_publication(
+    diverged, monkeypatch
+):
+    """AC1: the rollback must not be the thing that changes the file set.
+
+    A fixed `<target>.partial` would be overwritten on the way in and unlinked on
+    the way out, and `Creations` records only the target — so the rollback could
+    not have put it back. The staging name is unique per write instead.
+    """
+    root, vault_root, namespace = diverged
+    sibling = _staging_lookalike(namespace)
+    before = _vault_snapshot(namespace)
+    _tear_write_at(monkeypatch, _is_vault_archive, keep=_body_only)
+
+    with pytest.raises(OSError):
+        vault.resolve_project(
+            root, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
+        )
+
+    assert sibling.read_bytes() == b"operator's notes, not ours\n"
+    assert _vault_snapshot(namespace) == before
+
+
+def test_a_pre_existing_staging_sibling_survives_a_successful_publication(diverged):
+    """The worse half of the same defect: a fixed name consumes it on success.
+
+    `os.replace(staged, target)` would have moved the operator's file onto the
+    archive — silent loss on the *happy* path, with no failure for anyone to
+    notice. #87's contract is explicit that an operator file inside the namespace
+    survives a sync, and that has to hold when the sync works.
+    """
+    root, vault_root, namespace = diverged
+    sibling = _staging_lookalike(namespace)
+
+    vault.resolve_project(
+        root, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
+    )
+
+    assert sibling.read_bytes() == b"operator's notes, not ours\n"
+    archive = next((namespace / vault.SESSIONS_DIRNAME).glob("*.md"))
+    assert b"operator's notes" not in archive.read_bytes()
+
+
+def test_staging_siblings_are_unique_per_write(tmp_path):
+    """The mechanism behind both tests above, pinned directly."""
+    root = tmp_path / "vault"
+    target = root / "projects" / "alpha" / vault.SESSIONS_DIRNAME / "s.md"
+    target.parent.mkdir(parents=True)
+
+    first = vault._free_staging_sibling(root, target)
+    first.write_bytes(b"occupied")
+    second = vault._free_staging_sibling(root, target)
+
+    assert first != second
+    assert second.name.endswith(vault.STAGING_SUFFIX)
+    assert not second.exists()
+    # Never collides with the archive glob, so a leftover cannot be read as one.
+    assert second not in set((target.parent).glob("*.md"))
