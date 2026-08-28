@@ -688,3 +688,34 @@ def test_marker_present_but_state_missing_is_unavailable(tmp_path, checkout):
     # Restoring the state file makes both paths work again.
     state_file.write_bytes(original)
     assert vault.export_project(checkout, vault_root, "alpha")
+
+
+def test_state_referencing_a_missing_archive_is_unavailable(tmp_path, checkout):
+    """A state naming a session with no readable archive is torn, not empty."""
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    vault.export_project(checkout, vault_root, "alpha")
+
+    namespace = vault_root / "projects" / "alpha"
+    archive = next((namespace / "sessions").glob("*.md"))
+    archive.unlink()
+
+    with pytest.raises(vault.VaultUnavailable, match="no readable archive"):
+        vault.import_project(checkout, vault_root, "alpha")
+    with pytest.raises(vault.VaultUnavailable, match="no readable archive"):
+        vault.export_project(checkout, vault_root, "alpha")
+
+
+def test_vault_writes_use_lf_regardless_of_platform(tmp_path, checkout):
+    """Identical content must be identical bytes, so Git mode sees no churn."""
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    vault.export_project(checkout, vault_root, "alpha")
+
+    namespace = vault_root / "projects" / "alpha"
+    for path in (
+        vault.state_path(namespace),
+        namespace / vault.MARKER_FILENAME,
+        next((namespace / "sessions").glob("*.md")),
+    ):
+        assert b"\r\n" not in path.read_bytes(), path

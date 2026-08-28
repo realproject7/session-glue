@@ -622,7 +622,7 @@ class LocalWrite:
                 _prepare_target(self.history_dir, target)
                 original = target.read_bytes() if target.is_file() else None
                 applied.append((target, original))
-                target.write_text(self._staged[relative_path], encoding="utf-8")
+                target.write_text(self._staged[relative_path], encoding="utf-8", newline="\n")
         except Exception:
             for target, original in reversed(applied):
                 if original is None:
@@ -917,7 +917,31 @@ def _require_populated_namespace(namespace: Path, project_id: str) -> None:
     read_marker(path, project_id)
     # A marker without state is a torn namespace, not an empty one: treating it
     # as empty would let an export overwrite state it never read.
-    read_state(path, required=True)
+    state = read_state(path, required=True)
+    require_referenced_archives(path, state)
+
+
+def require_referenced_archives(namespace: Path, state: dict[str, Any]) -> dict[str, str]:
+    """Fully read every archive the vault state references, before any write.
+
+    Reading is the check: on a sync-client folder an online-only placeholder is
+    present in a listing and stats with a plausible size, so only reading the
+    bytes distinguishes "not synced yet" from "not there". A state that names a
+    session no archive carries is a torn vault, not an empty one.
+    """
+    archives = read_vault_archives(namespace)
+    present = {_session_id_of(text) for text in archives.values()}
+    referenced = {str(state.get("head_session_id") or "")}
+    referenced.update(
+        str(entry.get("session_id", "")) for entry in state.get("lifecycle") or []
+    )
+    missing = sorted(sid for sid in referenced if sid and sid not in present)
+    if missing:
+        raise VaultUnavailable(
+            "vault not fully available: state references session(s) with no readable "
+            f"archive: {', '.join(missing)}"
+        )
+    return archives
 
 
 def _publish(
@@ -953,14 +977,14 @@ def _publish(
             raise VaultError("injected publication fault")
         target = path / relative_path
         _prepare_target(root, target)
-        target.write_text(content[relative_path], encoding="utf-8")
+        target.write_text(content[relative_path], encoding="utf-8", newline="\n")
         written += 1
     state_target = state_path(path)
     _prepare_target(root, state_target)
-    state_target.write_text(render_vault_state(state), encoding="utf-8")
+    state_target.write_text(render_vault_state(state), encoding="utf-8", newline="\n")
     marker_target = path / MARKER_FILENAME
     _prepare_target(root, marker_target)
-    marker_target.write_text(render_marker(project_id), encoding="utf-8")
+    marker_target.write_text(render_marker(project_id), encoding="utf-8", newline="\n")
 
 
 def export_project(
@@ -1124,7 +1148,7 @@ def _write_sync_state(repo_root: Path, project_id: str, digest: str) -> None:
     """Final local write of a fully successful operation."""
     path = sync_state_path(repo_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_sync_state(project_id, digest), encoding="utf-8")
+    path.write_text(render_sync_state(project_id, digest), encoding="utf-8", newline="\n")
 
 
 # --------------------------------------------------------------------------- #
