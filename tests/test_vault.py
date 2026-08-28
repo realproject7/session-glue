@@ -970,7 +970,7 @@ _GUARD_CALLS = frozenset({
 #: values through containers, so it cannot see that -- a limit, stated here
 #: rather than papered over.
 _UNGUARDED_BY_DESIGN = {
-    ("Creations.undo", "write_bytes", "target"): (
+    ("Creations.restore", "write_bytes", "target"): (
         1,
         "rollback path (#93): restores the bytes of a target `_write_recorded` "
         "proved contained via `_prepare_target` before it displaced them",
@@ -2285,5 +2285,5 @@ def test_a_caller_supplied_record_still_owns_its_own_rollback(diverged, monkeypa
 
     # Not rolled back by `_publish` — but recorded, so the caller can.
     assert record.replaced, "nothing recorded for the caller to restore"
-    record.undo()
+    record.restore()
     assert archive.read_bytes() == original

@@ -649,9 +649,12 @@ class Creations:
     #87's contract is asymmetric on purpose: a rollback removes what the
     operation *created* and never touches anything that was already there, so an
     operator file sitting inside the transport namespace survives a failed sync.
-    #93 adds the other half — the bytes of a *replaced* file — which is a
-    restoration of what was already there rather than a removal, so the
-    asymmetry still holds: nothing this undoes was absent before the operation.
+    #93 records the other half — the bytes of a *replaced* file — but keeps it in
+    a separate :meth:`restore`, because the two transports need different halves.
+    Git's ``git reset --hard`` already restores tracked bytes, so calling both
+    would have this write our captured bytes back *over* the reset; on Windows,
+    where the reset re-applies ``autocrlf``, that re-dirties the clone with LF
+    line endings. Folder mode has no reset and needs both.
     """
 
     def __init__(self) -> None:
@@ -659,19 +662,25 @@ class Creations:
         self.dirs: list[Path] = []
         self.replaced: list[tuple[Path, bytes]] = []
 
+    def restore(self) -> None:
+        """Put back the bytes this publication displaced (#93).
+
+        Reverse order, so a target replaced twice in one publication returns to
+        the bytes it held before the *first* write. Separate from :meth:`undo`
+        because a transport that restores tracked bytes by other means must not
+        also run this — see the class docstring.
+        """
+        for target, original in reversed(self.replaced):
+            Path(target).write_bytes(original)
+
     def undo(self) -> None:
-        """Restore displaced bytes, delete created files, then prune their dirs.
+        """Delete created files, then prune the directories they needed.
 
         Directories matter beyond tidiness: an empty ``projects/<id>/sessions/``
         left behind makes :func:`_namespace_is_empty` report a populated
         namespace, so a failed first sync would be read as an unavailable vault
         on every later attempt.
-
-        Restores run first and in reverse: a target replaced twice in one
-        publication is returned to the bytes it held before the *first* write.
         """
-        for target, original in reversed(self.replaced):
-            Path(target).write_bytes(original)
         for target in reversed(self.files):
             Path(target).unlink(missing_ok=True)
         for directory in reversed(self.dirs):
@@ -1100,11 +1109,11 @@ def _publish(
     vault root.
 
     ``created`` decides who owns recovery. When a caller passes one it also owns
-    the rollback: #87 gives that to the Git transport, which has to sequence it
-    against a ``git reset --hard`` that restores tracked bytes but cannot remove
-    a file that was never committed. When no record is passed — folder mode —
-    there is no outer transport to recover, so this rolls back itself (#93):
-    displaced bytes restored, created targets removed.
+    the rollback: #87 gives that to the Git transport, which sequences it against
+    a ``git reset --hard`` that restores tracked bytes but cannot remove a file
+    that was never committed — so it wants :meth:`Creations.undo` and *not*
+    :meth:`Creations.restore`. When no record is passed — folder mode — there is
+    no outer transport, so this rolls back both halves itself (#93).
     """
     root = Path(vault_root)
     path = Path(namespace)
@@ -1127,6 +1136,8 @@ def _publish(
         _write_recorded(root, path / MARKER_FILENAME, render_marker(project_id), record)
     except Exception:
         if created is None:
+            # Folder mode has no outer transport: this call owns both halves.
+            record.restore()
             record.undo()
         raise
 
