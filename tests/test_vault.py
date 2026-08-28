@@ -2751,3 +2751,85 @@ def test_folder_mode_refuses_a_duplicate_on_import(tmp_path, checkout):
 
     with pytest.raises(vault.VaultError, match="duplicate session id"):
         vault.import_project(tmp_path / "fresh", vault_root, "alpha")
+
+
+# --------------------------------------------------------------------------- #
+# Issue #116 — collision-safe quarantine, and the folder transport's share
+# --------------------------------------------------------------------------- #
+
+
+def test_the_quarantine_never_reuses_an_occupied_name(tmp_path, checkout):
+    """The #93 hazard in a new place, which is why this mirrors `_free_staging_sibling`.
+
+    Two `--apply` runs inside the same second, or a retry after a partial
+    failure, land on the same timestamp. Reusing the name would write into — or
+    over — the first run's quarantine and destroy the copies this command exists
+    to preserve.
+    """
+    history = checkout / ".agent-history"
+    first = vault.free_quarantine_dir(checkout, "20260828T120000Z")
+    first.mkdir(parents=True)
+    (first / "already-here.md").write_text("an earlier run's copy\n", encoding="utf-8")
+
+    second = vault.free_quarantine_dir(checkout, "20260828T120000Z")
+
+    assert second != first
+    assert not second.exists()
+    assert (first / "already-here.md").read_text(encoding="utf-8") == "an earlier run's copy\n"
+    assert second.parent == history
+
+
+def test_plan_duplicate_recovery_reports_every_path_for_each_duplicated_id(checkout):
+    _local_duplicate_archive(checkout, "000-earlier")
+
+    plan = vault.plan_duplicate_recovery(checkout)
+
+    assert plan == {
+        "2026-08-28-1200-alpha": [
+            "sessions/000-earlier.md", "sessions/2026-08-28-1200-alpha.md",
+        ]
+    }
+
+
+def test_plan_duplicate_recovery_is_empty_on_a_unique_set(checkout):
+    """Declared control — and it is what makes the dry-run safe to run blind."""
+    assert vault.plan_duplicate_recovery(checkout) == {}
+
+
+def test_quarantine_moves_rather_than_copies(checkout):
+    """Moved out of `sessions/`, so the duplicate stops being live, and kept."""
+    _local_duplicate_archive(checkout, "000-earlier")
+    plan = vault.plan_duplicate_recovery(checkout)
+
+    quarantine, moved = vault.quarantine_duplicates(checkout, plan, "20260828T120000Z")
+
+    assert moved == ["sessions/000-earlier.md", "sessions/2026-08-28-1200-alpha.md"]
+    assert sorted(p.name for p in quarantine.glob("*.md")) == [
+        "000-earlier.md", "2026-08-28-1200-alpha.md",
+    ]
+    assert vault.read_local_archives(checkout) == {}
+
+
+def test_folder_mode_recovery_restores_a_working_state(tmp_path, checkout):
+    """AC3's shared-core folder arm.
+
+    Folder mode has no admission concept, but it reaches the same
+    `rebuild_derived` selection and the same #115 refusal, so it needs the same
+    exit.
+    """
+    vault_root = tmp_path / "vault"
+    vault.export_project(checkout, vault_root, "alpha")
+    _local_duplicate_archive(checkout, "000-earlier")
+    with pytest.raises(vault.VaultError, match="duplicate session id"):
+        vault.import_project(checkout, vault_root, "alpha")
+
+    plan = vault.plan_duplicate_recovery(checkout)
+    vault.quarantine_duplicates(checkout, plan, "20260828T120000Z")
+    vault.import_project(checkout, vault_root, "alpha")
+
+    assert sorted(
+        p.name for p in (checkout / ".agent-history" / vault.SESSIONS_DIRNAME).glob("*.md")
+    ) == ["2026-08-28-1200-alpha.md"]
+    assert sorted(
+        p.name for p in (checkout / ".agent-history" / "quarantine-20260828T120000Z").glob("*.md")
+    ) == ["000-earlier.md", "2026-08-28-1200-alpha.md"]
