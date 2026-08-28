@@ -141,6 +141,30 @@ def managed_files(agent: str) -> list[str]:
     return sorted(walk(assets.skill_dir(agent), ""))
 
 
+def _reject_managed_symlinks(target: Path, files: list[str], operation: str) -> None:
+    """Refuse a symlink at a *managed* path, during planning, before any mutation.
+
+    `_unmanaged_extras` cannot catch these: a symlink whose relative path is in
+    the managed set is by definition not an extra, so planning admitted it and
+    the apply loops rejected it only on reaching that path — after earlier
+    managed files had already been unlinked, leaving the skill partial (#105).
+
+    Shared by both plans so install and uninstall refuse at the same point, which
+    is the ordering `apply_uninstall` established and `apply_install` was brought
+    to in #92. Detection only: the symlink is never removed, because deleting a
+    file an operator placed is the mutation this preflight exists to avoid.
+    """
+    if not target.is_dir():
+        return
+    linked = sorted(rel for rel in files if (target / rel).is_symlink())
+    if linked:
+        raise SkillInstallError(
+            f"refusing to {operation} {target}: managed path(s) are symlinks, "
+            "which this tool will not write through or remove — delete them "
+            f"yourself first: {', '.join(linked)}"
+        )
+
+
 def _unmanaged_extras(target: Path, files: list[str]) -> list[str]:
     """Files/symlinks present under ``target`` that the bundle does not manage."""
     if not target.is_dir():
@@ -175,6 +199,7 @@ def plan_install(
             raise SkillInstallError(
                 f"{target} already exists; pass --replace to overwrite the managed files"
             )
+        _reject_managed_symlinks(target, files, "--replace")
         extras = _unmanaged_extras(target, files)
         if extras:
             raise SkillInstallError(
@@ -232,6 +257,7 @@ def plan_uninstall(
         raise SkillNotInstalledError(f"no skill installed at {target}")
     _reject_symlink(target)
     _reject_non_directory(target)
+    _reject_managed_symlinks(target, files, "uninstall")
     extras = _unmanaged_extras(target, files)
     if extras:
         raise SkillInstallError(
