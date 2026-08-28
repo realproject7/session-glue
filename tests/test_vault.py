@@ -1867,3 +1867,71 @@ def test_a_pre_feature_history_needing_root_migration_says_so_before_any_write(t
     other.mkdir()
     vault.import_project(other, vault_root, "alpha")
     assert validator.validate_history(other, check_sessions=True) == []
+
+
+def test_a_local_only_archive_survives_a_resolve_and_stays_indexed(pulled):
+    """AC6, resolve half: `rebuild_derived` must see the union, not the selection.
+
+    Its own docstring says rebuilding from the vault's set alone "would silently
+    orphan a local-only session, which nothing downstream would detect" — so the
+    archive surviving on disk is not enough to prove this. The `INDEX.yaml`
+    assertion is the one that would catch a subset rebuild.
+    """
+    other, vault_root = pulled
+    _write_history(other, session_id="2026-08-27-0900-local-only")
+    archive = _local_archive(other)
+    archive.write_text(
+        archive.read_text(encoding="utf-8").replace("Did the thing.", "My local edit."),
+        encoding="utf-8",
+    )
+
+    vault.resolve_project(
+        other, vault_root, "alpha", SESSION, archive_choices={SESSION: "vault"}
+    )
+
+    history = other / ".agent-history"
+    assert (history / vault.SESSIONS_DIRNAME / "2026-08-27-0900-local-only.md").is_file()
+    index = schema.parse_mapping((history / "INDEX.yaml").read_text(encoding="utf-8"))
+    assert "2026-08-27-0900-local-only" in {
+        str(entry.get("session_id")) for entry in index["sessions"]
+    }
+    assert validator.validate_history(other, check_sessions=True) == []
+
+
+def test_re_running_the_same_selector_completes_after_a_local_write_failure(
+    pulled, monkeypatch
+):
+    """AC4's recovery clause: vault published, local rolled back, same command finishes it.
+
+    This is the cross-store partial failure — the two stores cannot commit
+    together — so what makes it safe is that the second run is not a different
+    command with different flags.
+    """
+    other, vault_root = pulled
+    archive = _local_archive(other)
+    archive.write_text(
+        archive.read_text(encoding="utf-8").replace("Did the thing.", "My local edit."),
+        encoding="utf-8",
+    )
+
+    original_commit = vault.LocalWrite.commit
+    monkeypatch.setattr(
+        vault.LocalWrite, "commit", lambda self, **_: original_commit(self, fault_after=1)
+    )
+    with pytest.raises(vault.VaultError, match="injected replace-phase fault"):
+        vault.resolve_project(
+            other, vault_root, "alpha", SESSION, archive_choices={SESSION: "vault"}
+        )
+    monkeypatch.undo()
+
+    # The vault kept the publication; the identical command now completes.
+    vault.resolve_project(
+        other, vault_root, "alpha", SESSION, archive_choices={SESSION: "vault"}
+    )
+
+    landed = _local_archive(other).read_text(encoding="utf-8")
+    assert "Did the thing." in landed and "My local edit." not in landed
+    assert vault.import_project(other, vault_root, "alpha")
+    # Retention stayed idempotent across the two publications.
+    records = vault.read_manifest(vault_root / vault.PROJECTS_DIRNAME / "alpha")
+    assert len(records) == len({(r["session_id"], r["kind"], r["side"], r["sha256"]) for r in records})
