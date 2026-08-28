@@ -53,7 +53,7 @@ class HandoffWriteError(Exception):
     """Raised when a handoff cannot be written safely (e.g. a symlink escape)."""
 
 
-def _reject_symlink(path: Path) -> None:
+def reject_symlink(path: Path) -> None:
     """Refuse to follow a symlink at ``path``.
 
     A pre-existing symlink at ``.agent-history``, ``sessions/``, or one of the
@@ -97,7 +97,7 @@ def _reject_archive_collision(archive_path: Path, incoming_session_id: str | Non
         )
 
 
-def _assert_within(path: Path, root_resolved: Path) -> None:
+def assert_within(path: Path, root_resolved: Path) -> None:
     """Assert ``path`` resolves to a location inside ``root_resolved``."""
     resolved = path.resolve()
     if resolved != root_resolved and root_resolved not in resolved.parents:
@@ -182,8 +182,8 @@ def close_session(repo_root: Path, session_id: str | None, status: str) -> str:
     index_path = history_dir / INDEX_FILENAME
     # Same symlink guard the create path uses: refuse to follow a symlinked
     # history dir or INDEX.yaml that could redirect the write outside repo_root.
-    _reject_symlink(history_dir)
-    _reject_symlink(index_path)
+    reject_symlink(history_dir)
+    reject_symlink(index_path)
     if not index_path.is_file():
         raise HandoffWriteError(f"no INDEX.yaml to update at {index_path}")
     try:
@@ -283,10 +283,10 @@ def create_handoff(
 
     # Safety checks BEFORE creating directories or writing anything, so a
     # rejected write leaves no partial state.
-    _reject_symlink(history_dir)
-    _reject_symlink(sessions_dir)
+    reject_symlink(history_dir)
+    reject_symlink(sessions_dir)
     for path in (archive_path, latest_path, resume_path, index_path, decisions_path):
-        _reject_symlink(path)
+        reject_symlink(path)
 
     # Refuse to silently overwrite a different session that slugified to the same
     # archive name. Runs before any mkdir/write so a rejected collision leaves the
@@ -297,8 +297,8 @@ def create_handoff(
 
     # After creating the dirs, confirm they resolve inside repo_root (catches a
     # symlinked ancestor directory).
-    _assert_within(history_dir, root_resolved)
-    _assert_within(sessions_dir, root_resolved)
+    assert_within(history_dir, root_resolved)
+    assert_within(sessions_dir, root_resolved)
 
     document = render_document(frontmatter, body)
 

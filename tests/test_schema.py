@@ -596,7 +596,7 @@ def test_numeric_hash_round_trips_as_string():
 
 def test_hash_value_round_trips_stably():
     # #72 round-trip (replaces the removed #37 comment round-trip test): a value
-    # containing `#` survives parse -> dump -> parse unchanged. `_dump_scalar`
+    # containing `#` survives parse -> dump -> parse unchanged. `dump_scalar`
     # quotes any `#`-containing string, so the canonical form is unambiguous.
     data = {"primary_goal": "after #207 merge", "completed_tasks": ["#214 merged"]}
     reparsed = parse_mapping(dump_mapping(data))
@@ -624,7 +624,7 @@ def test_dump_mapping_round_trips_scalars_and_sequences():
     ],
 )
 def test_dump_mapping_round_trips_escaped_scalars(value):
-    # Values that _dump_scalar escapes must survive a dump -> parse cycle
+    # Values that dump_scalar escapes must survive a dump -> parse cycle
     # unchanged (previously _parse_scalar stripped quotes without unescaping).
     data = {"note": value}
     assert parse_mapping(dump_mapping(data)) == data

@@ -329,7 +329,7 @@ def _register_agent_history_exclude(repo_root: Path) -> str | None:
     duplicate line), a symlinked ``info``/``exclude`` on the write path, or any
     read/write error. Fully fail-open and stdlib-only: it never raises, never
     calls git/subprocess, and never changes create's exit code. The symlink
-    checks mirror ``writer._reject_symlink`` (never write through a symlink), in
+    checks mirror ``writer.reject_symlink`` (never write through a symlink), in
     skip-not-raise form to keep the freeze fail-open.
     """
     try:
