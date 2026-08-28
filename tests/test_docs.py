@@ -243,10 +243,10 @@ def test_agent_surfaces_records_the_vault_boundary_without_adding_behavior():
     doc must not become a second place where the boundary is defined and can
     drift.
     """
-    boundary = AGENT_SURFACES.split("## Requirement", 1)[0]
+    boundary = _flat(AGENT_SURFACES.split("## Requirement", 1)[0])
     assert "The default is **local**" in boundary
     assert "the command, the vault path, and the project ID" in boundary
-    assert "never retries, polls, or\n  synchronizes on its own initiative" in boundary
+    assert "never retries, polls, or synchronizes on its own initiative" in boundary
     assert "references/protocol.md" in boundary
     # A pointer, not a fork of the contract.
     assert "adds no behavior of its own" in boundary

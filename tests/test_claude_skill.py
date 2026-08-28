@@ -17,6 +17,8 @@ from __future__ import annotations
 import session_glue.assets as assets
 
 SKILL = assets.skill_dir("claude").joinpath("SKILL.md").read_text(encoding="utf-8")
+#: Whitespace-collapsed copy, so a claim matches wherever the line wrap fell.
+FLAT_SKILL = " ".join(SKILL.split())
 
 
 def test_claude_skill_frontmatter_name_is_session_glue():
@@ -63,8 +65,8 @@ def test_claude_skill_documents_explicit_vault_resume():
     two ``SKILL.md`` files legitimately differ (the Claude invocation note), so
     this content is asserted separately rather than by comparison.
     """
-    assert "The default is local. Never sync on your own initiative." in SKILL
-    assert "glue sync pull --repo-root . --project-id <id> --vault-dir <path>" in SKILL
-    assert "glue sync pull --repo-root . --project-id <id> --vault-git-dir <path>" in SKILL
-    assert "do not authenticate or handle a" in SKILL
-    assert "vault not fully available" in SKILL
+    assert "The default is local. Never sync on your own initiative." in FLAT_SKILL
+    assert "glue sync pull --repo-root . --project-id <id> --vault-dir <path>" in FLAT_SKILL
+    assert "glue sync pull --repo-root . --project-id <id> --vault-git-dir <path>" in FLAT_SKILL
+    assert "do not authenticate or handle a" in FLAT_SKILL
+    assert "vault not fully available" in FLAT_SKILL
