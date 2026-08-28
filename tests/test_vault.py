@@ -2355,3 +2355,163 @@ def test_staging_siblings_are_unique_per_write(tmp_path):
     assert not second.exists()
     # Never collides with the archive glob, so a leftover cannot be read as one.
     assert second not in set((target.parent).glob("*.md"))
+
+
+# --------------------------------------------------------------------------- #
+# Issue #106 — containment resolves BOTH roots, so a symlinked project_root
+# cannot masquerade as an in-repo offset
+# --------------------------------------------------------------------------- #
+
+
+def _escaping_project_root(tmp_path):
+    """`<repo>/packages/app` that is really a symlink out of the repository."""
+    repo = tmp_path / "repo"
+    (repo / "packages").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    escaped = repo / "packages" / "app"
+    escaped.symlink_to(outside, target_is_directory=True)
+    return repo, escaped, outside
+
+
+def _repo_reached_through_a_symlink(tmp_path):
+    """A valid repository whose *path* runs through a symlink.
+
+    The shape a symlinked worktree, a symlinked home, or macOS `/tmp` produces.
+    This is the case that separates resolving both roots from resolving only the
+    child: child-only rejects it, which would refuse a perfectly good setup.
+    """
+    real = tmp_path / "real"
+    (real / "repo" / "packages" / "api").mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    return link / "repo", link / "repo" / "packages" / "api"
+
+
+def test_export_refuses_a_project_root_that_escapes_through_a_symlink(tmp_path):
+    """AC2: rejected before publication — the vault must not exist afterwards.
+
+    Lexically `<repo>/packages/app` is inside the repo, so the old check accepted
+    it and stored `<vault-root>/packages/app` — an offset claiming an in-repo
+    location that materializes somewhere else on another checkout.
+    """
+    repo, escaped, _ = _escaping_project_root(tmp_path)
+    _write_history(repo, project_root=str(escaped))
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+
+    with pytest.raises(vault.VaultError, match="outside repo_root"):
+        vault.export_project(repo, vault_root, "alpha")
+
+    assert not (vault_root / vault.PROJECTS_DIRNAME).exists()
+
+
+def test_migrate_roots_refuses_a_project_root_that_escapes_through_a_symlink(tmp_path):
+    """AC2, the other route: rejected before the migration mutates anything."""
+    repo, escaped, _ = _escaping_project_root(tmp_path)
+    _write_history(repo)
+    history = repo / ".agent-history"
+    before = {p: p.read_bytes() for p in history.rglob("*") if p.is_file()}
+
+    with pytest.raises(vault.VaultError, match="outside repo_root"):
+        vault.migrate_roots(repo, "2026-08-28-1200-alpha", escaped)
+
+    assert {p: p.read_bytes() for p in history.rglob("*") if p.is_file()} == before
+
+
+def test_export_still_accepts_a_repository_reached_through_a_symlink(tmp_path):
+    """AC1/AC3: the case that distinguishes resolve-both from resolve-child-only.
+
+    Resolving only the project root rejects this — the resolved child sits under
+    `real/` while the unresolved parent is `link/` — which would refuse every
+    operator whose checkout is reached through a symlink.
+    """
+    repo, nested = _repo_reached_through_a_symlink(tmp_path)
+    _write_history(repo, project_root=str(nested))
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+
+    assert vault.export_project(repo, vault_root, "alpha")
+
+    archive = next(
+        (vault_root / vault.PROJECTS_DIRNAME / "alpha" / vault.SESSIONS_DIRNAME).glob("*.md")
+    ).read_text(encoding="utf-8")
+    assert f"project_root: {vault.VAULT_ROOT_TOKEN}/packages/api" in archive
+
+
+def test_migrate_roots_still_accepts_a_repository_reached_through_a_symlink(tmp_path):
+    """AC3's accepted case on the migration route."""
+    repo, nested = _repo_reached_through_a_symlink(tmp_path)
+    _write_history(repo)
+
+    relative = vault.migrate_roots(repo, "2026-08-28-1200-alpha", nested)
+
+    rewritten = (repo / ".agent-history" / relative).read_text(encoding="utf-8")
+    # Parsed, not matched as a raw substring: this scalar is a *native* path, and
+    # on Windows the serializer quotes it and escapes every separator, so
+    # `project_root: C:\a\b` never appears literally. The canonical-form
+    # assertions elsewhere in this file can match raw text because
+    # `<vault-root>/…` is forward-slash by construction and unquoted.
+    frontmatter, _ = schema.parse_frontmatter(rewritten)
+    assert frontmatter["project_root"] == str(nested)
+
+
+@pytest.mark.parametrize(
+    "layout",
+    ["nested", "equal"],
+    ids=["normal-nested-in-repo", "project-root-equals-repo-root"],
+)
+def test_ordinary_project_roots_are_unaffected(tmp_path, layout):
+    """AC1's second half: valid paths keep their raw root-scalar rewrite.
+
+    `project_root == repo_root` renders as exactly `<vault-root>` with no offset,
+    which is #77's contract and must survive the change to resolved comparison.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    if layout == "nested":
+        project = repo / "packages" / "api"
+        project.mkdir(parents=True)
+        expected = f"{vault.VAULT_ROOT_TOKEN}/packages/api"
+    else:
+        project = repo
+        expected = vault.VAULT_ROOT_TOKEN
+    _write_history(repo, project_root=str(project))
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+
+    assert vault.export_project(repo, vault_root, "alpha")
+
+    archive = next(
+        (vault_root / vault.PROJECTS_DIRNAME / "alpha" / vault.SESSIONS_DIRNAME).glob("*.md")
+    ).read_text(encoding="utf-8")
+    assert f"project_root: {expected}" in archive
+
+
+def test_a_vanished_project_root_is_not_newly_refused(tmp_path):
+    """`Path.resolve()` is non-strict, so a stale archive keeps working.
+
+    An archive can name a `project_root` whose directory has since been deleted.
+    Resolution must not turn that into a refusal — it resolves what exists and
+    appends the rest.
+    """
+    repo = tmp_path / "repo"
+    (repo / "packages").mkdir(parents=True)
+    gone = repo / "packages" / "api"          # never created
+    _write_history(repo, project_root=str(gone))
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+
+    assert vault.export_project(repo, vault_root, "alpha")
+
+
+def test_a_dangling_escape_is_still_refused(tmp_path):
+    """The escape must stay caught when its symlink target no longer exists."""
+    repo, escaped, outside = _escaping_project_root(tmp_path)
+    outside.rmdir()                            # the symlink now dangles
+    _write_history(repo, project_root=str(escaped))
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+
+    with pytest.raises(vault.VaultError, match="outside repo_root"):
+        vault.export_project(repo, vault_root, "alpha")

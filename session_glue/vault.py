@@ -264,12 +264,25 @@ def _replace_root_scalars(text: str, repo_root: str, project_root: str) -> str:
 def contained_offset(project_root: str, repo_root: str) -> str:
     """Return the normalized POSIX offset of ``project_root`` under ``repo_root``.
 
-    Returns ``""`` when the two are equal. Raises :class:`VaultError` when the
-    project root lies outside the repository root — that case is never silently
-    flattened, and is recoverable only through :func:`migrate_roots`.
+    Returns ``""`` when the two resolve to the same directory. Raises
+    :class:`VaultError` when the project root lies outside the repository root —
+    that case is never silently flattened, and is recoverable only through
+    :func:`migrate_roots`.
+
+    **Both** roots are resolved before the comparison. Lexically, a
+    ``<repo>/packages/app`` that is a symlink to somewhere outside looks
+    contained, so the vault stored an in-repo offset for a path that is not in
+    the repo, and it materialized somewhere else entirely on another checkout
+    (#106).
+
+    Resolving only the *child* would fix that and break a repository reached
+    *through* a symlink — a symlinked worktree or home, or macOS ``/tmp`` — by
+    refusing a perfectly valid setup. Resolving both is also what every other
+    containment check here already does: :func:`writer.assert_within`,
+    :func:`skills._assert_within`, and ``validator``'s history check.
     """
-    parent = os.path.normpath(str(repo_root))
-    child = os.path.normpath(str(project_root))
+    parent = Path(repo_root).resolve()
+    child = Path(project_root).resolve()
     if parent == child:
         return ""
     relative = os.path.relpath(child, parent)
@@ -951,7 +964,10 @@ def migrate_roots(repo_root: Path | str, session_id: str, project_root: Path | s
         raise VaultError(f"unknown session id {session_id!r}: no archive carries it")
 
     new_project_root = os.path.normpath(str(project_root))
-    contained_offset(new_project_root, str(root.resolve()))  # refuses an escape
+    # Refuses an escape, including one through a symlink: `contained_offset`
+    # resolves both roots, so a `<repo>/x` that points outside is rejected here
+    # rather than migrated to a path that only looks contained (#106).
+    contained_offset(new_project_root, str(root.resolve()))
     rewritten = _replace_root_scalars(archives[target], str(root.resolve()), new_project_root)
     archives[target] = rewritten
 
