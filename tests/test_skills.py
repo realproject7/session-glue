@@ -456,3 +456,145 @@ def test_uninstall_user_scope_rejects_a_symlinked_ancestor(tmp_path, agent, monk
     assert main(["skill", "uninstall", agent, "--scope", "user"]) == 1
 
     assert _tree(outside) == before
+
+
+# --------------------------------------------------------------------------- #
+# Issue #105 — a symlink at a *managed* path is refused during planning
+# --------------------------------------------------------------------------- #
+
+
+def _exact_tree(target: Path) -> dict[str, bytes | None]:
+    """Every path under the target and its bytes; `None` for dirs and symlinks.
+
+    Symlinks read as `None` rather than their target's bytes, so the comparison
+    cannot be satisfied by following a link the operation was supposed to refuse.
+    """
+    return {
+        p.relative_to(target).as_posix(): (
+            p.read_bytes() if p.is_file() and not p.is_symlink() else None
+        )
+        for p in sorted(target.rglob("*"))
+    }
+
+
+def _symlink_a_managed_leaf(target: Path, outside: Path, agent: str) -> Path:
+    """Replace a managed *inner* file with a symlink pointing out of the scope.
+
+    Distinct from #92's cases: the ancestor and the final target are both intact,
+    and the relative path is in the managed set — so `_unmanaged_extras` does not
+    see it as an extra and planning used to admit it.
+    """
+    victim = outside / "operator-owned.md"
+    victim.write_bytes(b"operator data the tool must not touch\n")
+    leaf = target / "references" / "protocol.md"
+    assert "references/protocol.md" in _MANAGED[agent], "leaf must be a managed path"
+    leaf.unlink()
+    leaf.symlink_to(victim)
+    return victim
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+@pytest.mark.parametrize("operation", ["install-replace", "uninstall"])
+def test_a_managed_leaf_symlink_is_refused_before_any_repo_scope_mutation(
+    tmp_path, agent, operation, capsys
+):
+    """AC1/AC2/AC3: repo scope, both agents, both operations, exact tree preserved.
+
+    Before #105 the removal loop deleted the earlier managed files and only then
+    reached the symlink — codex lost `SKILL.md` and `agents/openai.yaml`, claude
+    lost `SKILL.md`, on both operations. The tree comparison is the assertion
+    that catches that; a bare `rc == 1` passes on the broken version, because the
+    old code also exited 1 *after* deleting.
+    """
+    repo = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    repo.mkdir()
+    outside.mkdir()
+    assert _install(repo, agent) == 0
+    target = _target(repo, agent)
+    victim = _symlink_a_managed_leaf(target, outside, agent)
+    before = _exact_tree(target)
+
+    code = _install(repo, agent, "--replace") if operation == "install-replace" else _uninstall(repo, agent)
+
+    assert code == 1
+    assert _exact_tree(target) == before, "the selected scope was mutated before the refusal"
+    assert victim.read_bytes() == b"operator data the tool must not touch\n"
+    err = capsys.readouterr().err
+    assert "references/protocol.md" in err, "the refusal must name the offending path"
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+@pytest.mark.parametrize("operation", ["install-replace", "uninstall"])
+def test_a_managed_leaf_symlink_is_refused_before_any_user_scope_mutation(
+    tmp_path, agent, operation, monkeypatch, capsys
+):
+    """The scope half of AC3's matrix.
+
+    User scope resolves its root from the environment rather than a flag, so it
+    is a distinct path through `scope_root` — the dimension #105's original AC3
+    left unstated and which review required be named.
+    """
+    home = tmp_path / "home"
+    outside = tmp_path / "outside"
+    home.mkdir()
+    outside.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    assert main(["skill", "install", agent, "--scope", "user"]) == 0
+    target = _target(home, agent)
+    victim = _symlink_a_managed_leaf(target, outside, agent)
+    before = _exact_tree(target)
+
+    argv = ["skill", "install", agent, "--scope", "user", "--replace"]
+    if operation == "uninstall":
+        argv = ["skill", "uninstall", agent, "--scope", "user"]
+    code = main(argv)
+
+    assert code == 1
+    assert _exact_tree(target) == before
+    assert victim.read_bytes() == b"operator data the tool must not touch\n"
+    assert "references/protocol.md" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+def test_the_refusal_is_prevention_only_and_leaves_the_symlink_in_place(tmp_path, agent):
+    """Scope decision: prevention only, manual remediation.
+
+    The tool must not delete the symlink — removing a file an operator placed is
+    the mutation this preflight exists to avoid. So the state persists until they
+    clear it, and every route keeps refusing; that is the agreed behaviour, not a
+    defect. Once removed by hand, the ordinary flow works again.
+    """
+    repo = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    repo.mkdir()
+    outside.mkdir()
+    assert _install(repo, agent) == 0
+    target = _target(repo, agent)
+    _symlink_a_managed_leaf(target, outside, agent)
+    leaf = target / "references" / "protocol.md"
+
+    assert _install(repo, agent, "--replace") == 1
+    assert leaf.is_symlink(), "the tool removed a file the operator placed"
+    assert _uninstall(repo, agent) == 1
+    assert leaf.is_symlink()
+
+    # Manual remediation is the documented way out, and it restores the flow.
+    leaf.unlink()
+    assert _install(repo, agent, "--replace") == 0
+    for rel in _MANAGED[agent]:
+        assert (target / rel).is_file() and not (target / rel).is_symlink()
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+def test_a_valid_bundle_is_unaffected_by_the_new_preflight(tmp_path, agent):
+    """AC3's other half: the check must not refuse a normal install or uninstall."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert _install(repo, agent) == 0
+    assert _install(repo, agent, "--replace") == 0
+    for rel in _MANAGED[agent]:
+        assert (_target(repo, agent) / rel).read_bytes() == _bundle_bytes(agent, rel)
+    assert _uninstall(repo, agent) == 0
+    assert not _target(repo, agent).exists()
