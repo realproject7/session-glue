@@ -3216,4 +3216,34 @@ def test_the_three_causes_are_reported_with_distinct_wording(checkout):
 
     assert "something else occupies the path" in detail
     assert "no longer available" in detail
-    assert "the write itself failed" in detail
+    assert "the restoration operation failed" in detail
+
+
+def test_a_failed_removal_is_reported_in_the_same_bucket(checkout, monkeypatch):
+    """RE1: `failed` covers both restoration operations, not only the write.
+
+    Restoring *presence* for a file this invocation created means removing it,
+    and that `unlink` can fail too. Naming the bucket "write failure" was
+    accurate for one path and wrong for the other — the claim was narrower than
+    the code it described.
+    """
+    history = checkout / writer.AGENT_HISTORY_DIRNAME
+    absent = "RESUME_PROMPT.txt"
+    (history / absent).unlink(missing_ok=True)
+    snapshot = vault.snapshot_local_artifacts(checkout)
+    assert snapshot[absent] is None, "the fixture must start with the file absent"
+    created = "created by this operation\n"
+    (history / absent).write_text(created, encoding="utf-8")
+    ledger = {absent: created}
+
+    import pathlib
+
+    def failing_unlink(self, *a, **k):
+        raise OSError("injected failure removing a file we created")
+
+    monkeypatch.setattr(pathlib.Path, "unlink", failing_unlink)
+
+    collisions, failed = vault.restore_local_artifacts(checkout, snapshot, ledger)
+
+    assert failed == [absent], "the failed removal was not reported"
+    assert collisions == []

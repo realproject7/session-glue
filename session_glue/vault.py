@@ -1343,8 +1343,11 @@ class RestoreOutcome:
     - ``collisions`` — something *else* now occupies the target, so it is not
       ours to replace.
     - ``unrestorable`` — the quarantined copy is no longer there to restore.
-    - ``failed`` — the restore write itself failed, with nothing occupying the
-      path.
+    - ``failed`` — the restoration operation itself failed, with nothing
+      occupying the path. That covers **both** ways this path restores: writing
+      the pre-command bytes back, and removing a file this invocation created
+      whose snapshot says it was absent before. Naming only the write would be
+      accurate for one of them and wrong for the other.
 
     Collapsing any two prints a diagnosis that is not true: folding ``failed``
     into ``collisions`` reported *"something else occupies the path"* for a path
@@ -1386,8 +1389,8 @@ def _recovery_outcome_detail(outcome: "RestoreOutcome", quarantine: Path) -> str
         # `collisions` would print "something else occupies the path" for a path
         # nothing occupies — the same collapse `RestoreOutcome` exists to avoid.
         parts.append(
-            "could not restore (the write itself failed, so this is not an exact "
-            "restoration): " + ", ".join(outcome.failed)
+            "could not restore (the restoration operation failed, so this is not "
+            "an exact restoration): " + ", ".join(outcome.failed)
         )
     return "; " + "; ".join(parts)
 
