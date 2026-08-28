@@ -350,11 +350,46 @@ def sync(
     return digest
 
 
+def tracked_artifacts(clone: Path, project_id: str) -> set[str]:
+    """Namespace-relative paths this clone's index vouches for.
+
+    Tracked-ness is the Git transport's provenance signal. A path is in the
+    index only because a publication committed it there, which is exactly what
+    an operator-dropped or attacker-dropped clone file cannot arrange — and,
+    unlike anything read off the file itself, it cannot be produced by writing
+    convincing bytes into a convincing filename (#110).
+
+    It vouches for provenance, not integrity: someone who can commit in this
+    clone can also push to the vault remote directly, so for that actor this
+    tool is not the boundary. What it does close is the ungated republication of
+    a file nobody published.
+
+    ``.as_posix()`` because `git ls-files` speaks forward slashes on every
+    platform while ``str(Path)`` does not on Windows. A mismatch there would
+    match no path at all, admit nothing, and publish nothing — silently, the
+    same failure shape #104 hit.
+    """
+    path = Path(clone)
+    prefix = vault.project_dir(path, project_id).relative_to(path).as_posix()
+    listed = _run_git(path, ["ls-files", "-z", "--", prefix], LOCAL_TIMEOUT)
+    if listed.returncode != 0:
+        raise GitVaultError(
+            f"{CATEGORY_NOT_A_REPOSITORY}: cannot list tracked files under {prefix} in {path}"
+        )
+    return {
+        entry[len(prefix) + 1 :]
+        for entry in listed.stdout.split("\0")
+        if entry.startswith(f"{prefix}/")
+    }
+
+
 def push(repo_root: Path | str, clone: Path | str, project_id: str, **kwargs) -> str:
     def operation(clone_path: Path, created: "vault.Creations") -> str:
         return vault.export_project(
             repo_root, clone_path, project_id, write_local_state=False,
-            created=created, **kwargs
+            created=created,
+            admitted_archives_set=tracked_artifacts(clone_path, project_id),
+            **kwargs
         )
 
     return sync(repo_root, clone, project_id, operation, f"session-glue: sync {project_id}")
@@ -367,7 +402,9 @@ def resolve(repo_root: Path | str, clone: Path | str, project_id: str, head_sess
     def operation(clone_path: Path, created: "vault.Creations") -> str:
         return vault.resolve_project(
             repo_root, clone_path, project_id, head_session, write_local_state=False,
-            created=created, defer_local=deferred, **kwargs
+            created=created, defer_local=deferred,
+            admitted_archives_set=tracked_artifacts(clone_path, project_id),
+            **kwargs
         )
 
     return sync(

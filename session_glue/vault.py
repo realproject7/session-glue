@@ -912,12 +912,16 @@ def read_local_archives(repo_root: Path | str) -> dict[str, str]:
 
 
 def read_vault_archives(namespace: Path) -> dict[str, str]:
-    """Fully read every canonical archive in the vault namespace.
+    """Fully read every ``sessions/*.md`` present in the vault namespace.
 
-    A referenced artifact that is missing or unreadable raises
-    :class:`VaultUnavailable` rather than being treated as absent — on a
-    sync-client folder those two look identical from a directory listing, and
-    only a full read distinguishes them.
+    An artifact that is present but unreadable raises :class:`VaultUnavailable`
+    rather than being treated as absent — on a sync-client folder those two look
+    identical from a directory listing, and only a full read distinguishes them.
+
+    This is a listing, not a trust decision: it consults no reference set and
+    returns whatever is *there*, including a file no publication ever wrote. A
+    caller that is about to publish must first narrow it with
+    :func:`admitted_archives` (#110).
     """
     sessions_dir = Path(namespace) / SESSIONS_DIRNAME
     guard_contained_path(Path(namespace), sessions_dir)
@@ -934,6 +938,26 @@ def read_vault_archives(namespace: Path) -> dict[str, str]:
             ) from exc
     return archives
 
+
+
+def admitted_archives(
+    archives: dict[str, str], admitted: set[str] | None
+) -> dict[str, str]:
+    """Narrow a vault-side archive listing to what the transport vouches for.
+
+    ``admitted`` holds namespace-relative POSIX paths the transport is willing
+    to treat as vault artifacts; ``None`` means it offers no provenance and the
+    listing stands. Keeping the decision here — a set membership test on paths
+    the caller supplies — is what lets the Git transport contribute tracked-ness
+    without this module learning what a clone is.
+
+    Provenance rather than shape: an untracked file can carry parseable
+    frontmatter and a filename matching its own ``session_id``, so any rule read
+    off the candidate's own bytes can be satisfied by writing those bytes (#110).
+    """
+    if admitted is None:
+        return archives
+    return {path: text for path, text in archives.items() if path in admitted}
 
 # --------------------------------------------------------------------------- #
 # Operations
@@ -1226,8 +1250,15 @@ def export_project(
     fault_after: int | None = None,
     write_local_state: bool = True,
     created: "Creations | None" = None,
+    admitted_archives_set: set[str] | None = None,
 ) -> str:
     """Export the local history into the vault; return the resulting state digest.
+
+    ``admitted_archives_set`` is the transport's provenance vouch: the
+    namespace-relative paths it accepts as vault artifacts. Anything else in the
+    namespace is unknown and is neither republished nor rewritten — it is left
+    exactly where the operator left it, the way #104 leaves an unknown path.
+    ``None`` (folder mode) has no provenance source and admits the listing.
 
     ``write_local_state=False`` leaves the local baseline untouched so a
     transport with a later success condition — #80's upstream push — can record
@@ -1249,7 +1280,12 @@ def export_project(
     bootstrap = _namespace_is_bootstrap(namespace, read_sync_state(root))
     if not bootstrap:
         _require_populated_namespace(namespace, project_id)
-    vault_archives = {} if bootstrap else read_vault_archives(namespace)
+    # Narrowed at the read, before anything consults it: the divergence check,
+    # the gate's `changed` comparison and the published `content` must all see
+    # the same admitted set, or an unknown file would still steer one of them.
+    vault_archives = admitted_archives(
+        {} if bootstrap else read_vault_archives(namespace), admitted_archives_set
+    )
     vault_state = {"head_session_id": "", "lifecycle": [], "acknowledgements": []}
     if not bootstrap:
         vault_state = read_state(namespace)
@@ -1577,6 +1613,7 @@ def resolve_project(
     write_local_state: bool = True,
     created: "Creations | None" = None,
     defer_local: list | None = None,
+    admitted_archives_set: set[str] | None = None,
 ) -> str:
     """Resolve every named conflict with explicit selectors and publish the result.
 
@@ -1607,7 +1644,11 @@ def resolve_project(
         path: canonicalize_document(text) for path, text in read_local_archives(root).items()
     }
     vault_state = read_state(namespace)
-    vault_archives = read_vault_archives(namespace)
+    # Same admission as the export path. Resolve already gates every artifact it
+    # publishes, so an unknown file here is not an ungated publication — but it
+    # must not be able to demand an acknowledgement, nor be published once one is
+    # given (#110).
+    vault_archives = admitted_archives(read_vault_archives(namespace), admitted_archives_set)
 
     by_session_local = {_session_id_of(t): (p, t) for p, t in local_canonical.items()}
     by_session_vault = {_session_id_of(t): (p, t) for p, t in vault_archives.items()}
