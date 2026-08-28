@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import __version__, gitcheck, installer, leakscan, reader, skills, validator, writer
+from . import __version__, gitcheck, installer, leakscan, reader, skills, validator, vault, writer
 from .schema import (
     Handoff,
     HandoffParseError,
@@ -184,6 +184,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="New lifecycle status for the session.",
     )
     close.set_defaults(func=_cmd_close)
+
+    _add_sync_commands(subparsers)
 
     install = subparsers.add_parser(
         "install",
@@ -353,6 +355,235 @@ def _register_agent_history_exclude(repo_root: Path) -> str | None:
         )
     except OSError:
         return None
+
+
+# --------------------------------------------------------------------------- #
+# Personal Vault sync (issue #79 — filesystem-folder transport)
+# --------------------------------------------------------------------------- #
+
+#: Exit codes. Conflict and unavailability are deliberately distinct: one means
+#: "decide something", the other "wait for your sync client", and a user who
+#: cannot tell them apart will retry the wrong one.
+EXIT_ERROR = 1
+EXIT_CONFLICT = 3
+EXIT_UNAVAILABLE = 4
+
+
+def _add_vault_transport(parser: argparse.ArgumentParser) -> None:
+    """Add the transport selector.
+
+    This is the seam #80 extends: it adds ``--vault-git-dir`` to this same
+    mutually exclusive group, so exactly one transport is selectable and folder
+    semantics stay untouched.
+    """
+    transport = parser.add_mutually_exclusive_group(required=True)
+    transport.add_argument(
+        "--vault-dir",
+        metavar="PATH",
+        help=(
+            "Existing folder holding the vault. Must already exist; the command "
+            "never creates it or any intermediate parent."
+        ),
+    )
+
+
+def _add_common_sync_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--repo-root",
+        default=".",
+        metavar="PATH",
+        help="Repository root that holds .agent-history/ (default: current directory).",
+    )
+    parser.add_argument(
+        "--project-id",
+        required=True,
+        metavar="ID",
+        help=(
+            "Cross-device logical project identity. Never inferred. One project ID "
+            "per checkout: a different ID fails before any write."
+        ),
+    )
+
+
+def _add_sync_commands(subparsers: argparse._SubParsersAction) -> None:
+    sync = subparsers.add_parser(
+        "sync",
+        help="Explicit Personal Vault sync (opt-in; never automatic).",
+        description=(
+            "Explicitly synchronize .agent-history/ with a Personal Vault you "
+            "supply on every invocation. Nothing here runs automatically, "
+            "contacts a network, or handles a credential."
+        ),
+    )
+    sync_sub = sync.add_subparsers(dest="sync_command", metavar="<subcommand>", required=True)
+
+    push = sync_sub.add_parser("push", help="Export the local history into the vault.")
+    _add_common_sync_args(push)
+    _add_vault_transport(push)
+    push.add_argument(
+        "--acknowledge",
+        action="append",
+        default=[],
+        metavar="PATH:SHA256:LABEL",
+        help=(
+            "Acknowledge one exact privacy finding, copied verbatim from the "
+            "blocking output. Deliberate, shared, and potentially unsafe."
+        ),
+    )
+    push.set_defaults(func=_cmd_sync_push)
+
+    pull = sync_sub.add_parser("pull", help="Import the vault into the local history.")
+    _add_common_sync_args(pull)
+    _add_vault_transport(pull)
+    pull.set_defaults(func=_cmd_sync_pull)
+
+    resolve = sync_sub.add_parser("resolve", help="Resolve conflicts with explicit selectors.")
+    _add_common_sync_args(resolve)
+    _add_vault_transport(resolve)
+    resolve.add_argument("--head-session", required=True, metavar="ID")
+    resolve.add_argument(
+        "--archive",
+        action="append",
+        default=[],
+        metavar="SESSION_ID=local|vault",
+        help="Choose which side of an archive conflict becomes active. Repeatable.",
+    )
+    resolve.add_argument(
+        "--lifecycle",
+        action="append",
+        default=[],
+        metavar="SESSION_ID=local|vault",
+        help="Choose which side of a lifecycle conflict wins. Repeatable.",
+    )
+    resolve.add_argument("--acknowledge", action="append", default=[], metavar="PATH:SHA256:LABEL")
+    resolve.set_defaults(func=_cmd_sync_resolve)
+
+    migrate = sync_sub.add_parser(
+        "migrate-roots",
+        help="Local-only: bring one archive's project_root inside the repo root.",
+        description=(
+            "Rewrites only the two root scalars of the named local archive and "
+            "rebuilds derived views. Local-only: takes no vault path or project "
+            "ID and touches no vault."
+        ),
+    )
+    migrate.add_argument("--repo-root", default=".", metavar="PATH")
+    migrate.add_argument("--session-id", required=True, metavar="ID")
+    migrate.add_argument("--project-root", required=True, metavar="PATH")
+    migrate.set_defaults(func=_cmd_sync_migrate_roots)
+
+
+def _parse_selectors(values: list[str], flag: str) -> dict[str, str]:
+    selectors: dict[str, str] = {}
+    for raw in values:
+        session_id, sep, side = raw.partition("=")
+        if not sep or not session_id:
+            raise vault.VaultError(f"{flag} expects SESSION_ID=local|vault, got {raw!r}")
+        selectors[session_id] = side
+    return selectors
+
+
+def _parse_acknowledgements(values: list[str]) -> list[dict[str, str]]:
+    acknowledgements: list[dict[str, str]] = []
+    for raw in values:
+        path, sep, rest = raw.partition(":")
+        digest, sep2, label = rest.partition(":")
+        if not sep or not sep2 or not path or not digest or not label:
+            raise vault.VaultError(
+                f"--acknowledge expects PATH:SHA256:LABEL copied from the blocking "
+                f"output, got {raw!r}"
+            )
+        acknowledgements.append({"path": path, "sha256": digest, "label": label})
+    return acknowledgements
+
+
+def _resolved_vault_dir(args: argparse.Namespace) -> Path:
+    """Validate the folder transport target before anything is read or written.
+
+    The directory must already exist: a mistyped path would otherwise be
+    indistinguishable from a new vault, and push would build a complete, valid,
+    entirely local one and report success while the other device kept using the
+    intended folder.
+    """
+    vault_dir = Path(args.vault_dir)
+    if not vault_dir.is_dir():
+        raise vault.VaultError(
+            f"--vault-dir {vault_dir} does not exist or is not a directory; "
+            "create it yourself — this command never creates a vault root or any "
+            "intermediate parent"
+        )
+    return vault_dir
+
+
+def _run_sync(operation) -> int:
+    """Run one vault operation, mapping each failure class to its own exit code."""
+    try:
+        digest = operation()
+    except vault.PrivacyBlocked as exc:
+        print(f"glue sync: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    except vault.VaultUnavailable as exc:
+        print(f"glue sync: {exc}", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    except vault.VaultConflict as exc:
+        print(f"glue sync: {exc}", file=sys.stderr)
+        return EXIT_CONFLICT
+    except (vault.VaultError, writer.HandoffWriteError) as exc:
+        print(f"glue sync: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    print(f"vault state {digest}")
+    return 0
+
+
+def _cmd_sync_push(args: argparse.Namespace) -> int:
+    def operation() -> str:
+        vault_dir = _resolved_vault_dir(args)
+        problems = validator.validate_history(Path(args.repo_root), check_sessions=True)
+        if problems:
+            raise vault.VaultError(
+                "local history is not valid; refusing to export:\n  "
+                + "\n  ".join(problems)
+            )
+        return vault.export_project(
+            args.repo_root,
+            vault_dir,
+            args.project_id,
+            acknowledgements=_parse_acknowledgements(args.acknowledge),
+        )
+
+    return _run_sync(operation)
+
+
+def _cmd_sync_pull(args: argparse.Namespace) -> int:
+    def operation() -> str:
+        return vault.import_project(args.repo_root, _resolved_vault_dir(args), args.project_id)
+
+    return _run_sync(operation)
+
+
+def _cmd_sync_resolve(args: argparse.Namespace) -> int:
+    def operation() -> str:
+        return vault.resolve_project(
+            args.repo_root,
+            _resolved_vault_dir(args),
+            args.project_id,
+            args.head_session,
+            archive_choices=_parse_selectors(args.archive, "--archive"),
+            lifecycle_choices=_parse_selectors(args.lifecycle, "--lifecycle"),
+            acknowledgements=_parse_acknowledgements(args.acknowledge),
+        )
+
+    return _run_sync(operation)
+
+
+def _cmd_sync_migrate_roots(args: argparse.Namespace) -> int:
+    try:
+        relative_path = vault.migrate_roots(args.repo_root, args.session_id, args.project_root)
+    except (vault.VaultError, writer.HandoffWriteError) as exc:
+        print(f"glue sync migrate-roots: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    print(f"migrated {relative_path}")
+    return 0
 
 
 def _cmd_create(args: argparse.Namespace) -> int:
