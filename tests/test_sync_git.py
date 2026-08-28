@@ -2754,3 +2754,65 @@ def test_a_cleanup_inspection_failure_claims_no_emptiness(
     assert _history_bytes(checkout) == before, (
         "the inspection failure skipped the remaining restoration"
     )
+
+
+def test_a_collision_and_an_inspection_failure_do_not_contradict(
+    tmp_path, checkout, clone, monkeypatch, capsys
+):
+    """#127 AC2: the case that makes the emptiness claim material, not pedantic.
+
+    A restore collision leaves a copy in the quarantine, so the directory really
+    is occupied. If the enumeration then fails, the pre-fix wording put two
+    contradictory sentences in one error: one line says a copy is kept under the
+    quarantine, the next says the quarantine is empty and its retention affects
+    nothing. An operator who believes the second stops looking for the first —
+    which is worse than the traceback this ticket replaces, because a traceback
+    at least says nothing untrue (RE2, PR #130).
+    """
+    flag, target = _vault_with_a_unique_archive(tmp_path, "folder", clone)
+    _duplicate_archive(checkout, "000-earlier")
+    sessions = checkout / ".agent-history" / SESSIONS_DIRNAME
+    real_write = vault.write_sync_state
+
+    def occupy_then_raise(*args, **kwargs):
+        # An external file at a quarantined archive's own path: unrecorded, so
+        # #93 forbids replacing it, so the quarantined copy stays put and the
+        # directory is genuinely non-empty when the cleanup runs.
+        (sessions / "000-earlier.md").write_bytes(b"an operator's own file\n")
+        real_write(*args, **kwargs)
+        raise vault.VaultError("injected primary failure")
+
+    real_iterdir = pathlib.Path.iterdir
+
+    def iterdir_fails_on_the_quarantine(self, *a, **k):
+        if self.name.startswith("quarantine-"):
+            raise OSError(13, "Permission denied")
+        return real_iterdir(self, *a, **k)
+
+    monkeypatch.setattr(vault, "write_sync_state", occupy_then_raise)
+    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir_fails_on_the_quarantine)
+    capsys.readouterr()
+
+    rc = _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", flag, str(target), "--apply",
+    )
+    err = capsys.readouterr().err
+    # Before inspecting the tree: the patch that made the command's enumeration
+    # fail would make this test's own enumeration fail too.
+    monkeypatch.undo()
+
+    assert rc == cli.EXIT_ERROR
+    assert "the quarantined copy is kept under" in err, "the collision was not reported"
+    assert "it is empty" not in err, (
+        "the error says a copy is kept in the quarantine and that the quarantine is empty"
+    )
+    assert "does not affect what was restored" not in err, (
+        "a quarantine holding an unrestored copy was reported as harmless"
+    )
+    assert "whether anything remains inside it is unknown" in err
+    quarantines = list((checkout / ".agent-history").glob("quarantine-*"))
+    assert len(quarantines) == 1
+    assert [p.name for p in quarantines[0].iterdir()] == ["000-earlier.md"], (
+        "the fixture must leave the quarantine genuinely occupied"
+    )
