@@ -1469,3 +1469,401 @@ def test_resolve_refuses_a_symlinked_conflicts_source(tmp_path, synced):
 
     with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
         vault.read_manifest(namespace)
+
+
+# --------------------------------------------------------------------------- #
+# Issue #89 — pull preserves divergent local history instead of overwriting it
+# --------------------------------------------------------------------------- #
+
+
+SESSION = "2026-08-28-1200-alpha"
+
+
+@pytest.fixture()
+def pulled(tmp_path, checkout):
+    """Device B, having pulled once, so both sides hold the same session."""
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    vault.export_project(checkout, vault_root, "alpha")
+    other = tmp_path / "device-b"
+    other.mkdir()
+    vault.import_project(other, vault_root, "alpha")
+    return other, vault_root
+
+
+def _local_archive(root):
+    return next((root / ".agent-history" / vault.SESSIONS_DIRNAME).glob("*.md"))
+
+
+def _vault_state_path(vault_root):
+    return (
+        vault_root / vault.PROJECTS_DIRNAME / "alpha"
+        / vault.STATE_DIRNAME / vault.STATE_FILENAME
+    )
+
+
+def _set_vault_lifecycle(vault_root, session_id, status):
+    """Give the vault a lifecycle status for *session_id*, leaving the rest alone."""
+    path = _vault_state_path(vault_root)
+    state = schema.parse_mapping(path.read_text(encoding="utf-8"))
+    state["lifecycle"] = [{"session_id": session_id, "status": status}]
+    path.write_text(vault.render_vault_state(state), encoding="utf-8")
+
+
+def test_pull_refuses_when_the_same_session_diverged_and_writes_nothing(pulled):
+    """AC1/AC3: the data-loss path in #82 — `union.update` silently overwrote.
+
+    Asserted as *bytes preserved*, not merely as "it raised": the whole point of
+    #89 is that the local version is still there afterwards, so a `pytest.raises`
+    alone would pass even if pull had written first and failed later.
+    """
+    other, vault_root = pulled
+    archive = _local_archive(other)
+    mine = archive.read_text(encoding="utf-8").replace("Did the thing.", "My local edit.")
+    archive.write_text(mine, encoding="utf-8")
+    before = {p: p.read_bytes() for p in (other / ".agent-history").rglob("*") if p.is_file()}
+
+    with pytest.raises(vault.VaultConflict) as excinfo:
+        vault.import_project(other, vault_root, "alpha")
+
+    assert archive.read_text(encoding="utf-8") == mine
+    assert {p: p.read_bytes() for p in (other / ".agent-history").rglob("*") if p.is_file()} == before
+    assert f"--archive {SESSION}=local|vault" in str(excinfo.value)
+    assert "--lifecycle" not in str(excinfo.value)
+
+
+def test_pull_refuses_on_lifecycle_divergence_and_names_the_lifecycle_selector(pulled):
+    """AC3: divergence that is not in the archive bytes at all."""
+    other, vault_root = pulled
+    _set_vault_lifecycle(vault_root, SESSION, "DONE")
+    index = other / ".agent-history" / "INDEX.yaml"
+    index.write_text(
+        index.read_text(encoding="utf-8").replace("status: DONE", "status: BLOCKED"),
+        encoding="utf-8",
+    )
+    before = index.read_bytes()
+
+    with pytest.raises(vault.VaultConflict) as excinfo:
+        vault.import_project(other, vault_root, "alpha")
+
+    assert index.read_bytes() == before
+    assert f"--lifecycle {SESSION}=local|vault" in str(excinfo.value)
+    assert "--archive" not in str(excinfo.value)
+
+
+def test_pull_names_both_selectors_when_one_session_diverged_both_ways(pulled):
+    """AC3: "`--archive`, `--lifecycle`, or both" — the *both* case."""
+    other, vault_root = pulled
+    archive = _local_archive(other)
+    archive.write_text(
+        archive.read_text(encoding="utf-8").replace("Did the thing.", "My local edit."),
+        encoding="utf-8",
+    )
+    _set_vault_lifecycle(vault_root, SESSION, "DONE")
+    index = other / ".agent-history" / "INDEX.yaml"
+    index.write_text(
+        index.read_text(encoding="utf-8").replace("status: DONE", "status: BLOCKED"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(vault.VaultConflict) as excinfo:
+        vault.import_project(other, vault_root, "alpha")
+
+    message = str(excinfo.value)
+    assert f"--archive {SESSION}=local|vault" in message
+    assert f"--lifecycle {SESSION}=local|vault" in message
+    # One line for the session, carrying both selectors, rather than two entries.
+    assert sum(line.strip().startswith(SESSION) for line in message.splitlines()) == 1
+
+
+def test_pull_refuses_a_path_two_different_sessions_claim(pulled):
+    """AC1: not resolvable — no selector can name a path collision.
+
+    Raised as `VaultError`, not `VaultConflict`: pointing the operator at
+    `resolve` here would send them to a command with no selector that applies.
+    """
+    other, vault_root = pulled
+    archive = _local_archive(other)
+    archive.write_text(
+        archive.read_text(encoding="utf-8").replace(
+            f"session_id: {SESSION}", "session_id: 2026-08-29-0900-other"
+        ),
+        encoding="utf-8",
+    )
+    before = archive.read_bytes()
+
+    with pytest.raises(vault.VaultError) as excinfo:
+        vault.import_project(other, vault_root, "alpha")
+
+    assert not isinstance(excinfo.value, vault.VaultConflict)
+    assert archive.read_bytes() == before
+    message = str(excinfo.value)
+    assert f"{vault.SESSIONS_DIRNAME}/{SESSION}.md" in message
+    assert "2026-08-29-0900-other" in message and SESSION in message
+    assert "resolve" not in message
+
+
+def test_pull_refuses_an_archive_with_no_usable_session_id(pulled):
+    """AC1: the other non-resolvable shape."""
+    other, vault_root = pulled
+    archive = _local_archive(other)
+    archive.write_text(
+        archive.read_text(encoding="utf-8").replace(f"session_id: {SESSION}\n", ""),
+        encoding="utf-8",
+    )
+    before = archive.read_bytes()
+
+    with pytest.raises(vault.VaultError) as excinfo:
+        vault.import_project(other, vault_root, "alpha")
+
+    assert not isinstance(excinfo.value, vault.VaultConflict)
+    assert archive.read_bytes() == before
+    assert "no usable session ID" in str(excinfo.value)
+
+
+def test_pull_still_succeeds_when_the_shared_session_is_unchanged(pulled):
+    """The control: a guard that refuses everything would pass every test above."""
+    other, vault_root = pulled
+    assert vault.import_project(other, vault_root, "alpha")
+    assert validator.validate_history(other, check_sessions=True) == []
+
+
+def test_resolve_accepts_the_vault_version_that_pull_refused_to_take(pulled):
+    """AC2/AC4: taking the vault copy is a choice, and only `resolve` can make it."""
+    other, vault_root = pulled
+    archive = _local_archive(other)
+    original = archive.read_text(encoding="utf-8")
+    archive.write_text(original.replace("Did the thing.", "My local edit."), encoding="utf-8")
+
+    with pytest.raises(vault.VaultConflict):
+        vault.import_project(other, vault_root, "alpha")
+
+    vault.resolve_project(
+        other, vault_root, "alpha", SESSION, archive_choices={SESSION: "vault"}
+    )
+
+    # AC4: resolve is the flow that persists candidates, and both sides survive.
+    records = vault.read_manifest(vault_root / vault.PROJECTS_DIRNAME / "alpha")
+    assert {r["side"] for r in records if r["kind"] == "archive"} == {"local", "vault"}
+
+    # The selection is materialized locally, rooted at *this* checkout.
+    landed = _local_archive(other).read_text(encoding="utf-8")
+    assert "Did the thing." in landed and "My local edit." not in landed
+    assert vault.VAULT_ROOT_TOKEN not in landed
+    assert validator.validate_history(other, check_sessions=True) == []
+
+    # And the deadlock is gone: the pull that refused now has nothing to refuse.
+    assert vault.import_project(other, vault_root, "alpha")
+
+
+def test_resolving_to_local_keeps_the_local_bytes_and_clears_the_conflict(pulled):
+    """The counterpart selection: choosing `local` must also settle the conflict.
+
+    Worth asserting separately even though local already holds these bytes: the
+    resolve tail rewrites local history either way, so this is the case where a
+    wrong materialization would overwrite the operator's own choice with the
+    version they rejected.
+    """
+    other, vault_root = pulled
+    archive = _local_archive(other)
+    mine = archive.read_text(encoding="utf-8").replace("Did the thing.", "My local edit.")
+    archive.write_text(mine, encoding="utf-8")
+
+    vault.resolve_project(
+        other, vault_root, "alpha", SESSION, archive_choices={SESSION: "local"}
+    )
+
+    assert _local_archive(other).read_text(encoding="utf-8") == mine
+    assert vault.import_project(other, vault_root, "alpha")
+    assert _local_archive(other).read_text(encoding="utf-8") == mine
+
+
+def test_resolving_lifecycle_to_vault_lands_the_status_locally(pulled):
+    """AC4 for the other kind: a lifecycle selection is materialized too."""
+    other, vault_root = pulled
+    _set_vault_lifecycle(vault_root, SESSION, "DONE")
+    index = other / ".agent-history" / "INDEX.yaml"
+    index.write_text(
+        index.read_text(encoding="utf-8").replace("status: DONE", "status: BLOCKED"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(vault.VaultConflict):
+        vault.import_project(other, vault_root, "alpha")
+
+    vault.resolve_project(
+        other, vault_root, "alpha", SESSION, lifecycle_choices={SESSION: "vault"}
+    )
+
+    statuses = {
+        e["session_id"]: e["status"] for e in vault.read_state_local(other)["lifecycle"]
+    }
+    assert statuses[SESSION] == "DONE"
+    assert vault.import_project(other, vault_root, "alpha")
+
+
+def test_a_fault_in_resolves_local_write_leaves_the_same_file_set_and_bytes(
+    pulled, monkeypatch
+):
+    """The rollback half of the amended AC4.
+
+    Resolve's local materialization is a *replacement* of existing archives, so
+    a fault partway through is the case that could leave a checkout holding half
+    one version and half another. The vault publication has already succeeded at
+    this point; what this pins is that the local side is all-or-nothing.
+    """
+    other, vault_root = pulled
+    archive = _local_archive(other)
+    archive.write_text(
+        archive.read_text(encoding="utf-8").replace("Did the thing.", "My local edit."),
+        encoding="utf-8",
+    )
+    history = other / ".agent-history"
+    before = {p: p.read_bytes() for p in history.rglob("*") if p.is_file()}
+
+    original_commit = vault.LocalWrite.commit
+    monkeypatch.setattr(
+        vault.LocalWrite, "commit", lambda self, **_: original_commit(self, fault_after=1)
+    )
+    with pytest.raises(vault.VaultError, match="injected replace-phase fault"):
+        vault.resolve_project(
+            other, vault_root, "alpha", SESSION, archive_choices={SESSION: "vault"}
+        )
+
+    assert {p: p.read_bytes() for p in history.rglob("*") if p.is_file()} == before
+
+
+def test_a_failed_local_write_leaves_the_sync_digest_unadvanced(pulled, monkeypatch):
+    """Local materialization runs *before* `VAULT-SYNC.yaml`, so a failure is un-run."""
+    other, vault_root = pulled
+    archive = _local_archive(other)
+    archive.write_text(
+        archive.read_text(encoding="utf-8").replace("Did the thing.", "My local edit."),
+        encoding="utf-8",
+    )
+    before = vault.read_sync_state(other)
+
+    original_commit = vault.LocalWrite.commit
+    monkeypatch.setattr(
+        vault.LocalWrite, "commit", lambda self, **_: original_commit(self, fault_after=1)
+    )
+    with pytest.raises(vault.VaultError, match="injected replace-phase fault"):
+        vault.resolve_project(
+            other, vault_root, "alpha", SESSION, archive_choices={SESSION: "vault"}
+        )
+
+    assert vault.read_sync_state(other) == before
+
+
+def test_pull_does_not_persist_conflict_candidates(pulled):
+    """AC4: detection is pull's job; retention is `resolve`'s."""
+    other, vault_root = pulled
+    archive = _local_archive(other)
+    archive.write_text(
+        archive.read_text(encoding="utf-8").replace("Did the thing.", "My local edit."),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(vault.VaultConflict):
+        vault.import_project(other, vault_root, "alpha")
+
+    assert not (vault_root / vault.PROJECTS_DIRNAME / "alpha" / vault.CONFLICTS_DIRNAME).exists()
+
+
+def test_a_local_only_lifecycle_entry_survives_a_clean_pull(pulled):
+    """The vault's list alone would have dropped this; the merged one keeps it."""
+    other, vault_root = pulled
+    _write_history(other, session_id="2026-08-27-0900-local-only")
+    index = other / ".agent-history" / "INDEX.yaml"
+    index.write_text(
+        index.read_text(encoding="utf-8").replace(
+            "sessions:", "sessions:\n  - session_id: 2026-08-27-0900-local-only\n    status: DONE"
+        ),
+        encoding="utf-8",
+    )
+
+    vault.import_project(other, vault_root, "alpha")
+
+    assert "2026-08-27-0900-local-only" in index.read_text(encoding="utf-8")
+    assert {
+        e["session_id"] for e in vault.read_state_local(other)["lifecycle"]
+    } >= {"2026-08-27-0900-local-only"}
+
+
+def test_a_pre_feature_multi_session_history_pushes_pulls_and_resumes(tmp_path):
+    """AC7 / closes #82 AC7: the whole point of the feature, end to end.
+
+    "Pre-feature" is the load-bearing word: this checkout is built by the shipped
+    writer alone and has never synced, so it has no `VAULT-SYNC.yaml` and no
+    vault-shaped anything. It is the history an operator already had before the
+    vault existed, and it has to survive the round trip without a migration step.
+    """
+    source = tmp_path / "laptop"
+    source.mkdir()
+    sessions = [
+        "2026-08-26-0900-first",
+        "2026-08-27-1000-second",
+        "2026-08-28-1200-alpha",
+    ]
+    for session_id in sessions:
+        _write_history(source, session_id=session_id)
+    assert vault.read_sync_state(source) is None  # never synced: genuinely pre-feature
+    assert validator.validate_history(source, check_sessions=True) == []
+
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    vault.export_project(source, vault_root, "alpha")
+
+    other = tmp_path / "desktop"
+    other.mkdir()
+    vault.import_project(other, vault_root, "alpha")
+
+    history = other / ".agent-history"
+    assert {p.stem for p in (history / vault.SESSIONS_DIRNAME).glob("*.md")} == set(sessions)
+    assert validator.validate_history(other, check_sessions=True) == []
+
+    # Resume: the prompt and LATEST are rooted at *this* device, not the laptop.
+    resume = (history / "RESUME_PROMPT.txt").read_text(encoding="utf-8")
+    latest = (history / "LATEST.md").read_text(encoding="utf-8")
+    assert vault.VAULT_ROOT_TOKEN not in resume and vault.VAULT_ROOT_TOKEN not in latest
+    assert str(source) not in resume and str(source) not in latest
+    frontmatter, _ = schema.parse_frontmatter(latest)
+    assert frontmatter["repo_root"] == str(other)
+    assert frontmatter["session_id"] == sessions[-1]
+
+    # Recovery evidence: pulling again is a clean no-op rather than a conflict,
+    # which is what makes the migrated history genuinely usable and not a
+    # one-shot import.
+    assert vault.import_project(other, vault_root, "alpha")
+    assert validator.validate_history(other, check_sessions=True) == []
+
+
+def test_a_pre_feature_history_needing_root_migration_says_so_before_any_write(tmp_path):
+    """AC7's migration evidence: the blocking case names the session and writes nothing."""
+    source = tmp_path / "laptop"
+    source.mkdir()
+    _write_history(source, session_id="2026-08-26-0900-first")
+    _write_history(
+        source, session_id="2026-08-28-1200-alpha", project_root=str(tmp_path / "outside")
+    )
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+
+    with pytest.raises(vault.VaultError) as excinfo:
+        vault.export_project(source, vault_root, "alpha")
+
+    # Refused before any vault artifact exists, and pointing at the way out.
+    assert not (vault_root / vault.PROJECTS_DIRNAME).exists()
+    assert "migrate-roots" in str(excinfo.value)
+    # NOTE: the EPIC says sync "reports the blocking session ID"; this message
+    # names only the two paths. Out of scope for #89 — raised for @head rather
+    # than widened into here — so this asserts what ships today, deliberately.
+    assert "2026-08-28-1200-alpha" not in str(excinfo.value)
+
+    # The named migration is the documented way out, and then the round trip works.
+    vault.migrate_roots(source, "2026-08-28-1200-alpha", source)
+    vault.export_project(source, vault_root, "alpha")
+    other = tmp_path / "desktop"
+    other.mkdir()
+    vault.import_project(other, vault_root, "alpha")
+    assert validator.validate_history(other, check_sessions=True) == []

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from session_glue import cli, vault, vaultgit
+from session_glue import cli, schema, vault, vaultgit
 
 from test_vault import _write_history
 
@@ -654,3 +654,149 @@ def test_stage_or_commit_failure_removes_artifacts_that_never_reached_a_commit(
     assert _git(clone, "rev-parse", "HEAD").stdout.strip() == before_head
     assert not (clone / vault.PROJECTS_DIRNAME / "alpha").exists()
     assert vault.read_sync_state(checkout) is None
+
+
+# --------------------------------------------------------------------------- #
+# Issue #89 — pull over Git preserves divergent local history
+# --------------------------------------------------------------------------- #
+
+
+SESSION = "2026-08-28-1200-alpha"
+
+
+def _diverge_in_the_vault(clone, replacement="Diverged in the vault."):
+    """Publish a different version of the shared session from another device."""
+    archive = next((clone / "projects" / "alpha" / "sessions").glob("*.md"))
+    archive.write_text(
+        archive.read_text(encoding="utf-8").replace("Did the thing.", replacement),
+        encoding="utf-8",
+    )
+    _git(clone, "add", "--", "projects/alpha")
+    _git(clone, "commit", "--quiet", "-m", "diverge in the vault")
+    _git(clone, "push", "--quiet")
+
+
+def test_git_pull_refuses_divergence_and_makes_no_commit_or_push(
+    tmp_path, checkout, clone, bare_remote, capsys
+):
+    """AC3 + AC5 together: refuse the divergence *and* leave the remote alone.
+
+    The two halves belong in one test because AC5's risk is precisely that a
+    refusal path still mutates the clone on the way out — a commit made before
+    the conflict is detected would satisfy AC3 alone and still break AC5.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    other_clone = _clone(bare_remote, tmp_path / "clone-b")
+    other = tmp_path / "device-b"
+    other.mkdir()
+    assert _run(
+        "sync", "pull", "--repo-root", str(other), "--project-id", "alpha",
+        "--vault-git-dir", str(other_clone),
+    ) == 0
+
+    # Device A publishes a different version of the same session; device B has
+    # meanwhile edited its own copy.
+    _diverge_in_the_vault(clone)
+    local = next((other / ".agent-history" / "sessions").glob("*.md"))
+    mine = local.read_text(encoding="utf-8").replace("Did the thing.", "My local edit.")
+    local.write_text(mine, encoding="utf-8")
+
+    commits_before = _git(other_clone, "rev-list", "--count", "HEAD").stdout.strip()
+    remote_before = subprocess.run(
+        ["git", "-C", str(bare_remote), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert _run(
+        "sync", "pull", "--repo-root", str(other), "--project-id", "alpha",
+        "--vault-git-dir", str(other_clone),
+    ) == cli.EXIT_CONFLICT
+
+    assert local.read_text(encoding="utf-8") == mine
+    assert f"--archive {SESSION}=local|vault" in capsys.readouterr().err
+
+    # AC5: read-only with respect to the remote. The fast-forward is expected;
+    # a *new* commit or a push is not.
+    assert _git(other_clone, "status", "--porcelain").stdout.strip() == ""
+    assert subprocess.run(
+        ["git", "-C", str(bare_remote), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip() == remote_before
+    ours = _git(other_clone, "log", "--oneline", "--author=session-glue").stdout
+    assert "session-glue: sync alpha" not in ours.replace("seed", "")
+    assert commits_before  # the count was readable, so the assertion above is meaningful
+
+
+def test_git_pull_refuses_a_path_two_sessions_claim_without_overwriting(
+    tmp_path, checkout, clone, bare_remote, capsys
+):
+    """AC1 over Git: non-resolvable, so it is an error rather than a conflict."""
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    other_clone = _clone(bare_remote, tmp_path / "clone-b")
+    other = tmp_path / "device-b"
+    other.mkdir()
+    assert _run(
+        "sync", "pull", "--repo-root", str(other), "--project-id", "alpha",
+        "--vault-git-dir", str(other_clone),
+    ) == 0
+
+    local = next((other / ".agent-history" / "sessions").glob("*.md"))
+    collided = local.read_text(encoding="utf-8").replace(
+        f"session_id: {SESSION}", "session_id: 2026-08-29-0900-other"
+    )
+    local.write_text(collided, encoding="utf-8")
+    _diverge_in_the_vault(clone)
+
+    assert _run(
+        "sync", "pull", "--repo-root", str(other), "--project-id", "alpha",
+        "--vault-git-dir", str(other_clone),
+    ) == cli.EXIT_ERROR
+
+    assert local.read_text(encoding="utf-8") == collided
+    err = capsys.readouterr().err
+    assert "2026-08-29-0900-other" in err and SESSION in err
+
+
+def test_git_pull_refuses_lifecycle_divergence(tmp_path, checkout, clone, bare_remote, capsys):
+    """AC3 over Git for the kind that is not in the archive bytes."""
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    other_clone = _clone(bare_remote, tmp_path / "clone-b")
+    other = tmp_path / "device-b"
+    other.mkdir()
+    assert _run(
+        "sync", "pull", "--repo-root", str(other), "--project-id", "alpha",
+        "--vault-git-dir", str(other_clone),
+    ) == 0
+
+    state = clone / "projects" / "alpha" / "state" / "vault-state.yaml"
+    parsed = schema.parse_mapping(state.read_text(encoding="utf-8"))
+    parsed["lifecycle"] = [{"session_id": SESSION, "status": "DONE"}]
+    state.write_text(vault.render_vault_state(parsed), encoding="utf-8")
+    _git(clone, "add", "--", "projects/alpha")
+    _git(clone, "commit", "--quiet", "-m", "close the session elsewhere")
+    _git(clone, "push", "--quiet")
+
+    index = other / ".agent-history" / "INDEX.yaml"
+    index.write_text(
+        index.read_text(encoding="utf-8").replace("status: DONE", "status: BLOCKED"),
+        encoding="utf-8",
+    )
+    before = index.read_bytes()
+
+    assert _run(
+        "sync", "pull", "--repo-root", str(other), "--project-id", "alpha",
+        "--vault-git-dir", str(other_clone),
+    ) == cli.EXIT_CONFLICT
+
+    assert index.read_bytes() == before
+    assert f"--lifecycle {SESSION}=local|vault" in capsys.readouterr().err

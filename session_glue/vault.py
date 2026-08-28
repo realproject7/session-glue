@@ -1212,10 +1212,54 @@ def export_project(
     return digest
 
 
+#: The `glue sync resolve` flag that settles each kind of divergence.
+_RESOLVE_SELECTOR = {"archive": "--archive", "lifecycle": "--lifecycle"}
+
+
+def _pull_divergence(
+    local_archives: dict[str, str],
+    incoming: dict[str, str],
+    local_lifecycle: list[dict[str, Any]],
+    vault_lifecycle: list[dict[str, Any]],
+) -> tuple[dict[str, set[str]], list[str]]:
+    """What pull must refuse, as ``({session_id: kinds}, unresolvable paths)``.
+
+    Compares the bytes materialization would actually write against the bytes
+    already on disk, rather than canonical forms: the question pull has to answer
+    is whether the replacement would change the file, and both sides are in the
+    local frame here.
+
+    The two return values are different problems on purpose. A session in the
+    first is *resolvable* — the same session diverged, and `resolve` has a
+    selector for it. A path in the second is not: two different sessions claim
+    one path, or an archive carries no usable session ID, so there is no selector
+    to name and the data itself needs repair first.
+    """
+    kinds: dict[str, set[str]] = {}
+    unresolvable: list[str] = []
+    for path in sorted(set(local_archives) & set(incoming)):
+        local_text, incoming_text = local_archives[path], incoming[path]
+        if local_text == incoming_text:
+            continue
+        local_id = _session_id_of(local_text)
+        incoming_id = _session_id_of(incoming_text)
+        if not local_id or not incoming_id:
+            side = "local" if not local_id else "vault"
+            unresolvable.append(f"{path}: the {side} archive carries no usable session ID")
+        elif local_id != incoming_id:
+            unresolvable.append(
+                f"{path}: local holds {local_id}, the vault holds {incoming_id}"
+            )
+        else:
+            kinds.setdefault(local_id, set()).add("archive")
+    _, disagreeing = merge_lifecycle(local_lifecycle, vault_lifecycle)
+    for session_id in disagreeing:
+        kinds.setdefault(session_id, set()).add("lifecycle")
+    return kinds, unresolvable
+
+
 def import_project(repo_root: Path | str, vault_root: Path | str, project_id: str) -> str:
     """Import the vault into the local history; return the resulting state digest."""
-    from . import writer
-
     root = Path(repo_root)
     require_project_id(root, project_id)
     namespace = project_dir(Path(vault_root), project_id)
@@ -1234,17 +1278,67 @@ def import_project(repo_root: Path | str, vault_root: Path | str, project_id: st
         path: materialize_document(text, root) for path, text in vault_archives.items()
     }
     local_archives = read_local_archives(root)
+    local_lifecycle = read_state_local(root).get("lifecycle", [])
+    vault_lifecycle = vault_state.get("lifecycle", [])
+
+    # Before the union, not after: `union.update(materialized)` is the exact line
+    # that used to overwrite a divergent local archive with the vault's copy, so
+    # the comparison has to happen while both sides are still separate (#89).
+    diverging, unresolvable = _pull_divergence(
+        local_archives, materialized, local_lifecycle, vault_lifecycle
+    )
+    if unresolvable:
+        raise VaultError(
+            "pull cannot reconcile these paths and refuses rather than overwrite "
+            "either side; repair the data, then pull again:\n  "
+            + "\n  ".join(unresolvable)
+        )
+    if diverging:
+        raise VaultConflict(
+            "pull would replace divergent local history; nothing was written. "
+            "Run 'glue sync resolve' with an explicit selector for each:\n  "
+            + "\n  ".join(
+                f"{session_id}: "
+                + " ".join(
+                    f"{_RESOLVE_SELECTOR[kind]} {session_id}=local|vault"
+                    for kind in sorted(kinds)
+                )
+                for session_id, kinds in sorted(diverging.items())
+            )
+        )
+
     union = dict(local_archives)
     union.update(materialized)
 
     head = vault_state.get("head_session_id") or ""
-    lifecycle = vault_state.get("lifecycle", [])
-    derived = rebuild_derived(union, head, lifecycle)
+    # Merged rather than the vault's list alone: `merge_lifecycle` adopts a
+    # one-sided entry and every disagreement has already been refused above, so
+    # taking the vault's list here would drop a local-only entry silently.
+    merged_lifecycle, _ = merge_lifecycle(local_lifecycle, vault_lifecycle)
+    derived = rebuild_derived(union, head, merged_lifecycle)
 
     decisions = merge_decisions(
         _read_text(root, _local_decisions_path(root)),
         _read_text(Path(namespace), Path(namespace) / DECISIONS_FILENAME),
     )
+
+    _materialize_local(root, materialized, derived, decisions)
+
+    digest = state_digest(vault_state)
+    write_sync_state(root, project_id, digest)
+    return digest
+
+
+def _materialize_local(
+    root: Path, archives: dict[str, str], derived: dict[str, str], decisions: str
+) -> None:
+    """Replace local history with *archives* and *derived*, staged and reversible.
+
+    Shared by pull and by resolve's selection tail (#89): both have to land a
+    chosen set of archives plus rebuilt views as one step, and `LocalWrite`
+    already gives the staged replacement with reverse rollback the EPIC requires.
+    """
+    from . import writer
 
     history_dir = root / writer.AGENT_HISTORY_DIRNAME
     # Before the mkdir, not after: `LocalWrite.commit` does guard this root, but
@@ -1254,17 +1348,13 @@ def import_project(repo_root: Path | str, vault_root: Path | str, project_id: st
     guard_contained_path(root, history_dir)
     history_dir.mkdir(parents=True, exist_ok=True)
     write = LocalWrite(history_dir)
-    for path, text in materialized.items():
+    for path, text in archives.items():
         write.stage(path, text)
     if decisions:
         write.stage(DECISIONS_FILENAME, decisions)
     for name, text in derived.items():
         write.stage(name, text)
     write.commit()
-
-    digest = state_digest(vault_state)
-    write_sync_state(root, project_id, digest)
-    return digest
 
 
 def _local_decisions_path(repo_root: Path) -> Path:
@@ -1480,6 +1570,20 @@ def resolve_project(
         ),
     }
     _publish(Path(vault_root), namespace, content, new_state, project_id, created=created)
+
+    # The selection is only half-made until it exists locally: without this, a
+    # `--archive ID=vault` choice leaves the local copy untouched and pull's #89
+    # guard refuses the very version the operator just chose. Local before
+    # `VAULT-SYNC.yaml`, so a failure here leaves the digest unadvanced and the
+    # operation genuinely un-run rather than half-recorded.
+    local_active = {path: materialize_document(text, root) for path, text in active.items()}
+    _materialize_local(
+        root,
+        local_active,
+        rebuild_derived(local_active, head_session, merged_lifecycle),
+        decisions,
+    )
+
     digest = state_digest(new_state)
     if write_local_state:
         write_sync_state(root, project_id, digest)
