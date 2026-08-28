@@ -2616,3 +2616,75 @@ def test_folder_export_still_reads_a_namespace_local_archive(tmp_path, checkout)
     assert "sessions/stray.md" in vault.read_vault_archives(
         vault.project_dir(vault_root, "alpha")
     )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #114 — the vault-side decision log is admitted like an archive
+# --------------------------------------------------------------------------- #
+
+
+def _namespace_with_decisions(tmp_path, content):
+    namespace = tmp_path / "vault" / "projects" / "alpha"
+    (namespace / vault.SESSIONS_DIRNAME).mkdir(parents=True)
+    target = namespace / vault.DECISIONS_FILENAME
+    target.write_bytes(content) if isinstance(content, bytes) else target.write_text(
+        content, encoding="utf-8"
+    )
+    return namespace
+
+
+def test_reading_decisions_without_a_vouch_returns_the_log(tmp_path):
+    """Folder mode's contract: no provenance source, so no narrowing."""
+    namespace = _namespace_with_decisions(tmp_path, "# Decisions\n")
+
+    assert vault.read_vault_decisions(namespace) == "# Decisions\n"
+
+
+def test_an_unadmitted_decision_log_reads_as_absent(tmp_path):
+    """Absent rather than refused — `merge_decisions` treats "" as no decisions."""
+    namespace = _namespace_with_decisions(tmp_path, "# Decisions\n")
+
+    assert vault.read_vault_decisions(namespace, {"sessions/a.md"}) == ""
+
+
+def test_an_admitted_decision_log_is_read(tmp_path):
+    namespace = _namespace_with_decisions(tmp_path, "# Decisions\n")
+
+    assert vault.read_vault_decisions(
+        namespace, {vault.DECISIONS_FILENAME}
+    ) == "# Decisions\n"
+
+
+def test_an_unadmitted_undecodable_decision_log_is_never_read(tmp_path):
+    """#114's ordering requirement, with the only instrument that can prove it.
+
+    `_read_text` swallows `OSError` but not `UnicodeDecodeError`, so undecodable
+    bytes fail *at the read*. Reading then filtering would raise here; the
+    membership test runs first, so nothing is opened.
+    """
+    namespace = _namespace_with_decisions(tmp_path, b"\xff\xfe not utf-8 \xff")
+
+    assert vault.read_vault_decisions(namespace, set()) == ""
+
+
+def test_folder_export_still_reads_a_namespace_local_decision_log(tmp_path, checkout):
+    """AC1: folder mode supplies no admission set and is unchanged.
+
+    Its exposure is the local digest rather than an ungated push — a folder
+    vault has no staging step and no remote — so the boundary #114 draws is a
+    Git-transport boundary, exactly as #110 and #112 drew theirs.
+    """
+    vault_root = tmp_path / "vault"
+    vault.export_project(checkout, vault_root, "alpha")
+    namespace = vault.project_dir(vault_root, "alpha")
+    (namespace / vault.DECISIONS_FILENAME).write_text(
+        "# Decisions\n\n- [2026-08-28][2026-08-28-1200-alpha] folder-local\n",
+        encoding="utf-8",
+    )
+
+    _write_history(checkout, session_id="2026-08-29-0900-second")
+    vault.export_project(checkout, vault_root, "alpha")
+
+    assert "folder-local" in (namespace / vault.DECISIONS_FILENAME).read_text(
+        encoding="utf-8"
+    )
