@@ -953,6 +953,30 @@ def read_vault_archives(
     return archives
 
 
+
+def read_vault_decisions(namespace: Path, admitted: set[str] | None = None) -> str:
+    """Read the vault-side decision log the transport vouches for.
+
+    The membership test runs **before the bytes**, exactly as
+    :func:`read_vault_archives` does (#112). An unadmitted log reads as absent,
+    which is what makes it *ignored rather than refused*: `merge_decisions`
+    treats "" as no decisions, so publication proceeds without it.
+
+    Why an untracked log needed a boundary at all: `merge_decisions` is
+    idempotent on its own output, so a planted log that already carries the
+    canonical header with its recognised lines in canonical order satisfies
+    ``merged == decisions_vault``. The carry-forward exemption then treats it as
+    content whose acknowledgement "was given when it was introduced" — false
+    exactly for a file no publication ever wrote (#114).
+
+    Admission is forward-looking. A log a previous run already committed is
+    tracked, so it stays admitted; this does not un-track or re-gate it, and no
+    revocation path is in scope.
+    """
+    if admitted is not None and DECISIONS_FILENAME not in admitted:
+        return ""
+    return _read_text(Path(namespace), Path(namespace) / DECISIONS_FILENAME)
+
 # --------------------------------------------------------------------------- #
 # Operations
 # --------------------------------------------------------------------------- #
@@ -1308,7 +1332,7 @@ def export_project(
         )
 
     decisions_local = _read_text(root, _local_decisions_path(root))
-    decisions_vault = _read_text(Path(namespace), Path(namespace) / DECISIONS_FILENAME)
+    decisions_vault = read_vault_decisions(namespace, admitted)
     merged_decisions = merge_decisions(decisions_local, decisions_vault)
 
     sync_state = read_sync_state(root)
@@ -1466,7 +1490,7 @@ def import_project(
 
     decisions = merge_decisions(
         _read_text(root, _local_decisions_path(root)),
-        _read_text(Path(namespace), Path(namespace) / DECISIONS_FILENAME),
+        read_vault_decisions(namespace, admitted),
     )
 
     _materialize_local(root, materialized, derived, decisions)
@@ -1715,7 +1739,7 @@ def resolve_project(
     # artifact added here is gated automatically, because reaching the gate is
     # the default and exemption is what has to be spelled out.
     manifest_path = f"{CONFLICTS_DIRNAME}/{MANIFEST_FILENAME}"
-    decisions_vault = _read_text(Path(namespace), Path(namespace) / DECISIONS_FILENAME)
+    decisions_vault = read_vault_decisions(namespace, admitted)
     decisions = merge_decisions(_read_text(root, _local_decisions_path(root)), decisions_vault)
     merged_records = merge_manifest_records(read_manifest(namespace), records)
 

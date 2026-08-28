@@ -1650,3 +1650,219 @@ def test_a_normal_and_a_repeated_pull_are_unchanged(tmp_path, checkout, clone):
     assert sorted(p.name for p in (dest / ".agent-history" / "sessions").glob("*.md")) == [
         "2026-08-28-1200-alpha.md"
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #114 — Git provenance admission for the vault-side DECISIONS.md
+# --------------------------------------------------------------------------- #
+
+
+DECISIONS_REL = "projects/alpha/DECISIONS.md"
+
+#: A planted log that is a **fixed point** of `merge_decisions` — canonical
+#: header, recognised line, already in canonical order. This is the exploit
+#: shape: `merged == decisions_vault`, so the carry-forward exemption skips the
+#: gate entirely. Canonicality alone is not the discriminator; fixed-pointness
+#: is, which is why the control below is built from ordering, not from junk.
+FIXED_POINT_DECISIONS = (
+    writer.DECISIONS_HEADER
+    + f"- [2026-08-28][2026-08-28-1200-alpha] token {SECRET_SHAPED}\n"
+)
+
+#: Two recognised lines in reverse sort order: `merge_decisions` reorders them,
+#: so `merged != decisions_vault` and the gate fires on unfixed code too. The
+#: declared control.
+NON_FIXED_POINT_DECISIONS = (
+    writer.DECISIONS_HEADER
+    + f"- [2026-08-29][2026-08-29-0900-b] later {SECRET_SHAPED}\n"
+    + "- [2026-08-28][2026-08-28-1200-a] earlier\n"
+)
+
+
+def _baseline(checkout, clone):
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+
+def test_an_untracked_fixed_point_decision_log_is_not_published(
+    checkout, clone, bare_remote
+):
+    """AC2: ignored, not refused, and never privacy-exempted.
+
+    Asserted positively on what reached the remote: if admission were wired so
+    that nothing publishes, the unknown path's absence would pass while the real
+    artifact silently stopped shipping.
+    """
+    _baseline(checkout, clone)
+    (clone / DECISIONS_REL).write_text(FIXED_POINT_DECISIONS, encoding="utf-8")
+    expected = _second_session(checkout)
+
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    pushed = _pushed_paths(bare_remote)
+    assert expected in pushed, "the generated artifact stopped publishing"
+    assert DECISIONS_REL not in pushed
+    # Skipped, never rewritten, and still the operator's own untracked file.
+    assert (clone / DECISIONS_REL).read_text(encoding="utf-8") == FIXED_POINT_DECISIONS
+    assert DECISIONS_REL in _git(clone, "status", "--porcelain").stdout
+
+
+def test_a_non_fixed_point_untracked_log_is_still_gated(checkout, clone, bare_remote):
+    """AC4's declared control — it proves the *exploit fixture* is the right one.
+
+    The two arms diverge only on unfixed code, and that divergence is the whole
+    point:
+
+        unfixed  fixed-point log      rc=0, PUBLISHED  <- the bypass
+        unfixed  non-fixed-point log  rc=1, gated      <- never reached the defect
+        fixed    both                 rc=0, ignored
+
+    After the fix both arms are ignored, so this test alone proves nothing about
+    the fix — it is here so nobody concludes the bypass was "any untracked
+    decisions file". It was not: canonicality is irrelevant and fixed-pointness
+    is the discriminator, so a control built from junk lines would still be a
+    fixed point and would still have bypassed.
+    """
+    _baseline(checkout, clone)
+    (clone / DECISIONS_REL).write_text(NON_FIXED_POINT_DECISIONS, encoding="utf-8")
+    expected = _second_session(checkout)
+
+    # Ignored, not refused — the same contract as the fixed-point arm (AC2).
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    pushed = _pushed_paths(bare_remote)
+    assert expected in pushed
+    assert DECISIONS_REL not in pushed
+    assert (clone / DECISIONS_REL).read_text(encoding="utf-8") == NON_FIXED_POINT_DECISIONS
+
+
+def test_acknowledgement_cannot_promote_an_untracked_decision_log(
+    checkout, clone, bare_remote
+):
+    """AC3: there is no triple to acknowledge, because it is not vault input."""
+    _baseline(checkout, clone)
+    (clone / DECISIONS_REL).write_text(FIXED_POINT_DECISIONS, encoding="utf-8")
+    expected = _second_session(checkout)
+
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+        "--acknowledge", f"DECISIONS.md:{'0' * 64}:GitHub token (ghp_/gho_)",
+    ) == 0
+
+    pushed = _pushed_paths(bare_remote)
+    assert expected in pushed
+    assert DECISIONS_REL not in pushed
+
+
+def test_resolve_does_not_admit_an_untracked_decision_log(
+    checkout, clone, bare_remote
+):
+    """AC1 on the resolve path — where the carry-forward exemption is unconditional."""
+    _baseline(checkout, clone)
+    archive = next((clone / "projects" / "alpha" / "sessions").glob("*.md"))
+    archive.write_text(
+        archive.read_text(encoding="utf-8").replace("Did the thing.", "Diverged."),
+        encoding="utf-8",
+    )
+    _git(clone, "add", "--", "projects/alpha")
+    _git(clone, "commit", "--quiet", "-m", "diverge in the vault")
+    _git(clone, "push", "--quiet")
+    (clone / DECISIONS_REL).write_text(FIXED_POINT_DECISIONS, encoding="utf-8")
+
+    session_id = "2026-08-28-1200-alpha"
+    assert _run(
+        "sync", "resolve", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone), "--head-session", session_id,
+        "--archive", f"{session_id}=local",
+    ) == 0
+
+    pushed = _pushed_paths(bare_remote)
+    assert f"projects/alpha/sessions/{session_id}.md" in pushed, "resolution not published"
+    assert DECISIONS_REL not in pushed
+
+
+def test_pull_does_not_materialize_an_untracked_decision_log(tmp_path, checkout, clone):
+    """AC1 on the pull path: the payload must not reach local history."""
+    _baseline(checkout, clone)
+    (clone / DECISIONS_REL).write_text(FIXED_POINT_DECISIONS, encoding="utf-8")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    assert _run(
+        "sync", "pull", "--repo-root", str(dest), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+
+    assert sorted(p.name for p in (dest / ".agent-history" / "sessions").glob("*.md")) == [
+        "2026-08-28-1200-alpha.md"
+    ]
+    local_decisions = dest / ".agent-history" / "DECISIONS.md"
+    assert SECRET_SHAPED not in (
+        local_decisions.read_text(encoding="utf-8") if local_decisions.is_file() else ""
+    )
+
+
+@pytest.mark.parametrize("operation", ["push", "pull", "resolve"])
+def test_an_untracked_undecodable_decision_log_does_not_break_an_operation(
+    tmp_path, checkout, clone, operation
+):
+    """AC4: `_read_text` swallows `OSError` but not `UnicodeDecodeError`.
+
+    Before #114 each of these raised uncaught out of `cli.main`. The membership
+    test now runs before the read, so the bytes are never touched.
+    """
+    _baseline(checkout, clone)
+    (clone / DECISIONS_REL).write_bytes(b"\xff\xfe not utf-8 \xff")
+
+    if operation == "pull":
+        root = tmp_path / "dest"
+        root.mkdir()
+        extra: tuple[str, ...] = ()
+    else:
+        root = checkout
+        extra = ("--head-session", "2026-08-28-1200-alpha") if operation == "resolve" else ()
+
+    assert _run(
+        "sync", operation, "--repo-root", str(root), "--project-id", "alpha",
+        "--vault-git-dir", str(clone), *extra,
+    ) == 0
+
+
+def test_a_tracked_decision_log_still_publishes_and_carries_forward(
+    checkout, clone, bare_remote
+):
+    """AC3 + AC4's positive assertion: legitimate decisions are unaffected.
+
+    A benign local decision publishes, becomes tracked, and a later no-op sync
+    carries it forward without re-demanding acknowledgement — the exemption this
+    ticket narrows must still apply to content a publication actually wrote.
+    """
+    _baseline(checkout, clone)
+    (checkout / ".agent-history" / "DECISIONS.md").write_text(
+        writer.DECISIONS_HEADER
+        + "- [2026-08-28][2026-08-28-1200-alpha] chose the folder transport\n",
+        encoding="utf-8",
+    )
+
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    assert DECISIONS_REL in _pushed_paths(bare_remote)
+    assert DECISIONS_REL in _git(clone, "ls-files").stdout
+
+    commits = len(_git(clone, "log", "--oneline").stdout.strip().splitlines())
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    assert len(_git(clone, "log", "--oneline").stdout.strip().splitlines()) == commits
