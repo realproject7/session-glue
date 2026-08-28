@@ -719,3 +719,225 @@ def test_vault_writes_use_lf_regardless_of_platform(tmp_path, checkout):
         next((namespace / "sessions").glob("*.md")),
     ):
         assert b"\r\n" not in path.read_bytes(), path
+
+
+# --------------------------------------------------------------------------- #
+# Issue #88 — containment sweep across every vault source and target
+# --------------------------------------------------------------------------- #
+
+
+def _outside(tmp_path, name, text="secret from outside\n"):
+    """A file the operator never meant this tool to touch."""
+    external = tmp_path / "outside" / name
+    external.parent.mkdir(parents=True, exist_ok=True)
+    external.write_text(text, encoding="utf-8")
+    return external
+
+
+@pytest.fixture()
+def synced(tmp_path):
+    """A checkout and a folder vault that have already agreed once."""
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write_history(root)
+    vault.export_project(root, vault_root, "alpha")
+    return root, vault_root
+
+
+def test_push_refuses_a_symlinked_local_history_ancestor(tmp_path):
+    """AC1: the ancestor, not the leaf — each archive file is a real file."""
+    external = tmp_path / "elsewhere"
+    (external / "sessions").mkdir(parents=True)
+    root = tmp_path / "repo"
+    root.mkdir()
+    _write_history(root)
+    real_history = root / ".agent-history"
+    stolen = tmp_path / "stolen-history"
+    real_history.rename(stolen)
+    real_history.symlink_to(stolen, target_is_directory=True)
+
+    vault_root = tmp_path / "vault"
+    vault_root.mkdir()
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.export_project(root, vault_root, "alpha")
+    assert not (vault_root / vault.PROJECTS_DIRNAME / "alpha").exists()
+
+
+@pytest.mark.parametrize(
+    "relative", ["", "sessions", "state"], ids=["namespace", "sessions", "state"]
+)
+def test_pull_refuses_a_symlinked_vault_source(tmp_path, synced, relative):
+    """AC2 + AC6, pull half: foreign content must not reach the local history.
+
+    Asserted as *behaviour*, not as "an exception was raised". Without the guard
+    some of these still raise — a symlink to an empty directory surfaces as
+    "absent or empty", which is a VaultError too — so a bare `pytest.raises`
+    would pass for a reason that has nothing to do with containment. The
+    external side is therefore populated with real, well-formed vault content:
+    without the guard the import *succeeds* and materializes it.
+
+    `conflicts/` is deliberately absent — `import_project` never calls
+    `read_manifest`, so pull does not read it. It is covered on resolve below,
+    where it is actually read.
+    """
+    root, vault_root = synced
+    namespace = vault_root / vault.PROJECTS_DIRNAME / "alpha"
+
+    # A complete foreign vault namespace, so nothing fails for lack of content.
+    foreign_repo = tmp_path / "foreign-repo"
+    foreign_repo.mkdir()
+    _write_history(foreign_repo, session_id="2026-09-09-0900-not-yours")
+    foreign_vault = tmp_path / "foreign-vault"
+    foreign_vault.mkdir()
+    vault.export_project(foreign_repo, foreign_vault, "alpha")
+    foreign_namespace = foreign_vault / vault.PROJECTS_DIRNAME / "alpha"
+
+    target = namespace / relative if relative else namespace
+    source = foreign_namespace / relative if relative else foreign_namespace
+    import shutil
+
+    if target.exists():
+        shutil.rmtree(target)
+    target.symlink_to(source, target_is_directory=True)
+
+    other = tmp_path / "second"
+    other.mkdir()
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.import_project(other, vault_root, "alpha")
+
+    # The point of the ticket: the external target was never read into place.
+    landed = other / ".agent-history" / "sessions"
+    assert not landed.exists() or not any(landed.glob("*not-yours*"))
+
+
+def test_sync_state_read_refuses_a_symlinked_ancestor_before_deciding_identity(
+    tmp_path, synced
+):
+    """AC3: the read that feeds require_project_id and the bootstrap qualifier.
+
+    A foreign VAULT-SYNC.yaml reachable through a symlinked `.agent-history`
+    would let the one-project-ID guard decide identity from someone else's
+    digest — the identity check reading through the hole it exists to close.
+    """
+    root, vault_root = synced
+    foreign = tmp_path / "outside" / ".agent-history"
+    foreign.mkdir(parents=True)
+    (foreign / "VAULT-SYNC.yaml").write_text(
+        "project_id: someone-else\nlast_remote_state_sha256: " + "0" * 64 + "\n",
+        encoding="utf-8",
+    )
+
+    import shutil
+
+    shutil.rmtree(root / ".agent-history")
+    (root / ".agent-history").symlink_to(foreign, target_is_directory=True)
+
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.read_sync_state(root)
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.require_project_id(root, "alpha")
+
+
+def test_local_index_read_refuses_a_symlinked_ancestor(tmp_path, synced):
+    """AC3: INDEX.yaml feeds lifecycle merge and head selection."""
+    root, _ = synced
+    foreign = tmp_path / "outside" / ".agent-history"
+    foreign.mkdir(parents=True)
+    (foreign / "INDEX.yaml").write_text(
+        "schema_version: 1\nlatest_session: not-yours\nsessions: []\n", encoding="utf-8"
+    )
+
+    import shutil
+
+    shutil.rmtree(root / ".agent-history")
+    (root / ".agent-history").symlink_to(foreign, target_is_directory=True)
+
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.read_state_local(root)
+
+
+def test_sync_state_write_refuses_a_symlinked_ancestor_and_leaves_it_untouched(
+    tmp_path
+):
+    """AC4: the only *mutating* site in the enumeration."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    foreign = tmp_path / "outside" / ".agent-history"
+    foreign.mkdir(parents=True)
+    sentinel = foreign / "VAULT-SYNC.yaml"
+    sentinel.write_text("project_id: untouched\n", encoding="utf-8")
+    (root / ".agent-history").symlink_to(foreign, target_is_directory=True)
+
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.write_sync_state(root, "alpha", "0" * 64)
+    assert sentinel.read_text(encoding="utf-8") == "project_id: untouched\n"
+
+
+def test_decisions_read_refuses_rather_than_silently_reading_empty(tmp_path, synced):
+    """`_read_text` swallows OSError, so an unguarded redirect reads as "none".
+
+    Every other read raises; this one would merge silently, which is why the
+    guard has to run before the try rather than inside it.
+    """
+    root, vault_root = synced
+    namespace = vault_root / vault.PROJECTS_DIRNAME / "alpha"
+    external = _outside(tmp_path, "DECISIONS.md", "- someone else's decision\n")
+    (namespace / vault.DECISIONS_FILENAME).symlink_to(external)
+
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.export_project(root, vault_root, "alpha")
+
+
+def test_every_vault_helper_reaching_the_filesystem_guards_containment():
+    """AC5: a sweep, not a checklist — the criterion is that no helper opts out.
+
+    Asserted against the module source so a *new* helper that reads or writes
+    without a guard fails this test, which is the difference between closing the
+    class and closing the six sites that were cited.
+    """
+    import inspect
+
+    source = inspect.getsource(vault)
+    functions = [
+        obj
+        for name, obj in vars(vault).items()
+        if inspect.isfunction(obj) and obj.__module__ == vault.__name__
+    ]
+    # Dotted forms only: `_read_text(...)` is itself a guarded helper, and
+    # matching the bare substring would flag every function that delegates to it.
+    touches_fs = (
+        ".read_text(", ".write_text(", ".read_bytes(", ".write_bytes(",
+        ".iterdir(", ".glob(", ".mkdir(", ".unlink(",
+    )
+    guards = (
+        "guard_contained_path", "_reject_symlink_at", "_prepare_target",
+        "_write_recorded", "_read_text(",
+    )
+
+    unguarded = []
+    for func in functions:
+        body = inspect.getsource(func)
+        if any(call in body for call in touches_fs) and not any(g in body for g in guards):
+            unguarded.append(func.__name__)
+
+    # `render_*`/`parse_*` helpers never touch the filesystem, so they are absent
+    # by construction rather than by exclusion list.
+    assert unguarded == [], f"vault helpers reach the filesystem unguarded: {unguarded}"
+    assert "guard_contained_path" in source
+
+
+def test_resolve_refuses_a_symlinked_conflicts_source(tmp_path, synced):
+    """AC2, resolve half: `conflicts/` is read by resolve, not by pull."""
+    root, vault_root = synced
+    namespace = vault_root / vault.PROJECTS_DIRNAME / "alpha"
+    external = tmp_path / "outside" / "conflicts"
+    external.mkdir(parents=True)
+    (external / "manifest.yaml").write_text(
+        "format: session-glue-vault-conflicts-v1\nconflicts: []\n", encoding="utf-8"
+    )
+    (namespace / vault.CONFLICTS_DIRNAME).symlink_to(external, target_is_directory=True)
+
+    with pytest.raises((vault.VaultError, writer.HandoffWriteError)):
+        vault.read_manifest(namespace)
