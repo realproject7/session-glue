@@ -52,20 +52,6 @@ FLAT_README = _flat(README)
 # --------------------------------------------------------------------------- #
 
 
-def _shipped_sync_subcommands() -> list[str]:
-    """Every `glue sync` subcommand the parser actually registers."""
-    parser = cli.build_parser()
-    for action in parser._actions:
-        for name, sub in getattr(action, "_name_parser_map", {}).items():
-            if name != "sync":
-                continue
-            for inner in sub._actions:
-                names = getattr(inner, "_name_parser_map", {})
-                if names:
-                    return sorted(names)
-    raise AssertionError("no `glue sync` subparsers found")
-
-
 def test_readme_documents_both_transports_and_every_sync_subcommand():
     """Named for *every* subcommand, and now enumerating them from the parser.
 
@@ -76,7 +62,14 @@ def test_readme_documents_both_transports_and_every_sync_subcommand():
     exists to catch, the addition of a command. Deriving it from the parser is
     what makes the test's own name true.
     """
-    shipped = _shipped_sync_subcommands()
+    shipped: list[str] = []
+    for action in cli.build_parser()._actions:
+        for name, sub in getattr(action, "_name_parser_map", {}).items():
+            if name != "sync":
+                continue
+            for inner in sub._actions:
+                shipped = sorted(getattr(inner, "_name_parser_map", {})) or shipped
+    assert shipped, "no `glue sync` subparsers found"
     assert "recover-duplicates" in shipped, "fixture: the parser must register it"
     for name in shipped:
         assert f"glue sync {name}" in README, f"README never shows 'glue sync {name}'"
