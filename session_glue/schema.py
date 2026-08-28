@@ -144,7 +144,7 @@ def _parse_scalar(token: str) -> Any:
     """Parse a single scalar value (quoted string, ``[]`` literal, or bare string).
 
     Double-quoted strings are unescaped so they round-trip with
-    :func:`_dump_scalar`, which escapes ``\\`` and ``"``. A ``#`` is literal
+    :func:`dump_scalar`, which escapes ``\\`` and ``"``. A ``#`` is literal
     content everywhere — inside both quoted strings and bare scalars (issue
     references like ``#207`` are common handoff vocabulary); inline comments are
     NOT supported, only whole-line comments. The literal ``[]`` is the only
@@ -159,7 +159,7 @@ def _parse_scalar(token: str) -> Any:
     if len(token) >= 2 and token[0] in "\"'" and token[-1] == token[0]:
         inner = token[1:-1]
         if token[0] == '"':
-            # Reverse _dump_scalar's escaping in a single left-to-right pass:
+            # Reverse dump_scalar's escaping in a single left-to-right pass:
             # ``\\`` -> ``\`` and ``\"`` -> ``"``.
             inner = re.sub(r"\\(.)", lambda m: m.group(1), inner)
         return inner
@@ -297,7 +297,13 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return frontmatter, body
 
 
-def _dump_scalar(value: Any) -> str:
+def dump_scalar(value: Any) -> str:
+    """Serialize one scalar using this subset's quoting rules.
+
+    Public because the vault core (issue #78) must emit individual
+    scalars with byte-identical quoting when it rewrites the two root
+    fields of a raw handoff document.
+    """
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
@@ -325,12 +331,12 @@ def dump_mapping(data: dict[str, Any]) -> str:
                     first = True
                     for k, v in item.items():
                         prefix = "  - " if first else "    "
-                        out.append(f"{prefix}{k}: {_dump_scalar(v)}")
+                        out.append(f"{prefix}{k}: {dump_scalar(v)}")
                         first = False
                 else:
-                    out.append(f"  - {_dump_scalar(item)}")
+                    out.append(f"  - {dump_scalar(item)}")
         else:
-            out.append(f"{key}: {_dump_scalar(value)}")
+            out.append(f"{key}: {dump_scalar(value)}")
     return "\n".join(out)
 
 

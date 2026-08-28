@@ -35,7 +35,10 @@ Repository = "https://github.com/realproject7/session-glue"
 [project.optional-dependencies]
 dev = [
     "pytest>=7",
-    "ruff>=0.4",
+    # Pinned exactly: ruff 0.16.0 expanded the *default* rule set, so an
+    # unpinned install lints this tree against rules it predates and fails CI
+    # on untouched code. 0.15.4 is the newest release that passes clean.
+    "ruff==0.15.4",
     # Build frontend + backend so the packaging tests can build and inspect the
     # wheel/sdist locally without network isolation.
     "build>=1",
