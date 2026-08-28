@@ -2996,6 +2996,28 @@ def test_an_archive_without_a_session_id_still_migrates(tmp_path, checkout):
     )
 
 
+def test_an_archive_with_an_empty_session_id_still_migrates(tmp_path, checkout):
+    """AC3, direction two again — the *empty* id, which @head's dispatch names.
+
+    `_session_id_of` returns `""` here rather than `None`, and the guard skips
+    on falsiness rather than on `None`, so this stays a success. Pinned as its
+    own case because "missing/empty" is two code paths through
+    `parse_frontmatter`, and only one of them was covered by the missing-key
+    test above.
+    """
+    sessions = checkout / writer.AGENT_HISTORY_DIRNAME / vault.SESSIONS_DIRNAME
+    (sessions / "zzz-empty-id.md").write_text(
+        '---\nsession_id: ""\nsession_date: 2026-08-28\n---\n\n# Resume Prompt\n\nx\n',
+        encoding="utf-8",
+    )
+    nested = checkout / "packages" / "api"
+    nested.mkdir(parents=True)
+
+    assert vault.migrate_roots(checkout, "2026-08-28-1200-alpha", nested) == (
+        "sessions/2026-08-28-1200-alpha.md"
+    )
+
+
 def test_containment_is_still_enforced(tmp_path, checkout):
     """AC3: the #106 refusal is upstream of nothing this ticket changed."""
     outside = tmp_path / "outside"
