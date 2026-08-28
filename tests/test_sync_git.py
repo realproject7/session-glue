@@ -288,6 +288,87 @@ def test_failed_push_restores_the_clone_and_preserves_the_digest(checkout, clone
     assert vault.sync_state_path(checkout).read_bytes() == baseline
 
 
+def test_ahead_remote_and_failed_core_restores_without_undoing_the_fast_forward(
+    tmp_path, checkout, clone, bare_remote, capsys
+):
+    """Device B has pushed since our last sync, and then our core work fails.
+
+    The clone must come back to the commit it sat on once it was *current*, not
+    to the one it sat on before the fetch. Commits fetched from the upstream are
+    the operator's own work from another device; hard-resetting the branch away
+    from them is precisely the automatic reset of user-authored changes #80
+    forbids, and it would silently drop B's work from this checkout's view.
+    """
+    from test_vault import BODY
+
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    baseline = vault.sync_state_path(checkout).read_bytes()
+
+    # Device B moves the remote ahead through a second clone.
+    other = _clone(bare_remote, tmp_path / "other")
+    (other / "from-device-b.txt").write_text("b\n", encoding="utf-8")
+    _git(other, "add", "from-device-b.txt")
+    _git(other, "commit", "--quiet", "-m", "device b")
+    _git(other, "push", "--quiet")
+    remote_tip = _git(other, "rev-parse", "HEAD").stdout.strip()
+
+    secret = "ghp_" + "f" * 20
+    _write_history(checkout, session_id="2026-08-29-1100-third", body=BODY + f"\nToken {secret}\n")
+    capsys.readouterr()
+    code = _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    )
+    assert code == cli.EXIT_ERROR
+    assert secret not in capsys.readouterr().err
+
+    # B's commit is still there; ours never happened; nothing was left behind.
+    assert _git(clone, "rev-parse", "HEAD").stdout.strip() == remote_tip
+    assert _git(clone, "status", "--porcelain").stdout == ""
+    assert vault.sync_state_path(checkout).read_bytes() == baseline
+    assert subprocess.run(
+        ["git", "-C", str(bare_remote), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip() == remote_tip
+
+
+def test_core_failure_during_publication_leaves_no_tracked_change(monkeypatch, checkout, clone):
+    """The reachable core failure is one *during* publication, not at the gate.
+
+    The privacy gate and conflict detection both fail before anything is
+    written, so they can never exercise restoration. #77 contemplates a failed
+    publication, and in Git mode a half-written publication lands in the clone's
+    working tree — where the next preflight would refuse it as "uncommitted
+    tracked changes", naming files the operator never touched. So the failure is
+    injected where it can actually happen.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    baseline = vault.sync_state_path(checkout).read_bytes()
+    before_head = _git(clone, "rev-parse", "HEAD").stdout.strip()
+
+    published = clone / vault.PROJECTS_DIRNAME / "alpha" / "state" / "vault-state.yaml"
+    assert published.is_file()  # a tracked file every real publication rewrites
+
+    def half_published(*args, **kwargs):
+        published.write_text("half-written publication\n", encoding="utf-8")
+        raise vault.VaultError("publication failed midway")
+
+    monkeypatch.setattr(vault, "export_project", half_published)
+
+    with pytest.raises(vault.VaultError):
+        vaultgit.push(checkout, clone, "alpha")
+
+    assert _git(clone, "status", "--porcelain").stdout == ""
+    assert _git(clone, "rev-parse", "HEAD").stdout.strip() == before_head
+    assert vault.sync_state_path(checkout).read_bytes() == baseline
+
+
 def test_privacy_block_prevents_any_commit(tmp_path, clone, capsys):
     from test_vault import BODY
 

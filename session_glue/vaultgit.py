@@ -153,6 +153,16 @@ def preflight(clone: Path) -> tuple[str, str]:
             f"{CATEGORY_MISSING_UPSTREAM}: branch {branch.value()!r} has no configured upstream; "
             "set one with 'git branch --set-upstream-to' in the vault clone"
         )
+    # A branch may track another *local* branch, which has no remote component.
+    # Both the fetch and the push split the upstream on "/", so without this
+    # clause the operator would be told the fetch failed when in truth there was
+    # never a remote to fetch from.
+    if "/" not in upstream.value():
+        raise GitVaultError(
+            f"{CATEGORY_MISSING_UPSTREAM}: branch {branch.value()!r} tracks "
+            f"{upstream.value()!r}, which is a local branch, not a remote one; "
+            "the vault must live on a remote"
+        )
 
     dirty = _run_git(path, ["status", "--porcelain", "--untracked-files=no"], LOCAL_TIMEOUT)
     if dirty.returncode != 0:
@@ -195,14 +205,19 @@ def fetch_and_fast_forward(clone: Path, branch: str, upstream: str) -> None:
         )
 
 
-def restore(clone: Path, commit: str) -> None:
+def restore(clone: Path, commit: str) -> GitResult:
     """Return the clone to a pre-operation commit and tracked working-tree state.
 
-    Used only to undo *our own* commit after a failed push. Untracked files are
-    left alone, and no user-authored change is ever merged or reset: the
-    preflight has already established that the tracked tree was clean.
+    Used only to undo *our own* work — a partial write from a failed core
+    operation, or our commit after a failed push. The target is always the
+    post-fast-forward commit, never a pre-fetch one: commits fetched from the
+    upstream are the operator's own work from another device, and resetting the
+    branch away from them would be exactly the automatic reset of user-authored
+    changes this transport refuses to perform. Untracked files are left alone —
+    the core deletes the targets it created — and the preflight has already
+    established that the tracked tree was clean.
     """
-    _run_git(Path(clone), ["reset", "--hard", "--quiet", commit], LOCAL_TIMEOUT)
+    return _run_git(Path(clone), ["reset", "--hard", "--quiet", commit], LOCAL_TIMEOUT)
 
 
 def stage_commit_push(
@@ -260,19 +275,33 @@ def sync(
     Order matters throughout: preflight, fast-forward, then the #78 core work
     (which performs its own validation, privacy gate and content→state→marker
     publication), then exactly one commit, then the push — and only then the
-    local baseline. A failure anywhere after the core work restores the clone to
-    its pre-operation commit and leaves the local digest untouched.
+    local baseline.
+
+    ``before`` is the commit the clone sits on once it is current with its
+    upstream, and *both* the core work and the commit/push run under the same
+    rollback. A failure anywhere in that span returns the clone to ``before``
+    and leaves the local digest untouched: the core rolls back its own writes,
+    but this is the backstop for the case where it cannot, so a failed sync
+    never leaves a dirty clone that the next run's preflight would refuse for a
+    reason the operator did not cause.
     """
     clone_path = Path(clone)
     branch, upstream = preflight(clone_path)
     fetch_and_fast_forward(clone_path, branch, upstream)
     before = head_commit(clone_path)
 
-    digest = operation(clone_path)
     try:
+        digest = operation(clone_path)
         stage_commit_push(clone_path, project_id, branch, upstream, message)
-    except Exception:
-        restore(clone_path, before)
+    except Exception as exc:
+        # If the rollback itself fails the operator must hear about it here: the
+        # only other signal is the *next* run's preflight refusing a clone they
+        # did not dirty.
+        if restore(clone_path, before).returncode != 0:
+            raise GitVaultError(
+                f"{exc}; additionally, the vault clone could not be returned to "
+                f"{before} — reset it yourself before syncing again"
+            ) from exc
         raise
     vault.write_sync_state(Path(repo_root), project_id, digest)
     return digest
