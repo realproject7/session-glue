@@ -1033,11 +1033,12 @@ def _publish(
     so a symlinked namespace or nested parent cannot redirect a write out of the
     vault root.
 
-    ``created`` records every path this call brings into existence. A failure
-    here undoes those immediately; a caller that fails *later* — the Git
-    transport between publication and a successful push — undoes them through
-    the same record, because a ``git reset --hard`` restores tracked bytes and
-    cannot remove a file that was never committed (#87).
+    ``created`` records every path this call brings into existence but never
+    undoes anything itself: the caller decides. #87 gives that decision to the
+    Git transport, which needs it because a ``git reset --hard`` restores tracked
+    bytes and cannot remove a file that was never committed. Folder-mode recovery
+    on a failed publication is #93's, so a folder caller that passes no record
+    keeps today's behaviour exactly.
     """
     root = Path(vault_root)
     path = Path(namespace)
@@ -1048,19 +1049,15 @@ def _publish(
         guard_write_path(root, target)
 
     record = Creations() if created is None else created
-    try:
-        written = 0
-        for relative_path in sorted(content):
-            if fault_after is not None and written == fault_after:
-                raise VaultError("injected publication fault")
-            target = path / relative_path
-            _write_recorded(root, target, content[relative_path], record)
-            written += 1
-        _write_recorded(root, state_path(path), render_vault_state(state), record)
-        _write_recorded(root, path / MARKER_FILENAME, render_marker(project_id), record)
-    except Exception:
-        record.undo()
-        raise
+    written = 0
+    for relative_path in sorted(content):
+        if fault_after is not None and written == fault_after:
+            raise VaultError("injected publication fault")
+        target = path / relative_path
+        _write_recorded(root, target, content[relative_path], record)
+        written += 1
+    _write_recorded(root, state_path(path), render_vault_state(state), record)
+    _write_recorded(root, path / MARKER_FILENAME, render_marker(project_id), record)
 
 
 def _write_recorded(root: Path, target: Path, text: str, record: "Creations") -> None:
