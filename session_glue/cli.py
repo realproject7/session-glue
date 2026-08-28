@@ -795,7 +795,7 @@ def _cmd_sync_recover_duplicates(args: argparse.Namespace) -> int:
         # The transaction ledger: every artifact this invocation materializes,
         # with the bytes it wrote. The rollback may replace only what it can
         # prove it wrote and that still matches (#124).
-        ledger: dict[str, str] = {}
+        ledger: dict[str, bytes] = {}
         try:
             if clone_path is not None:
                 return vaultgit.pull(root, clone_path, args.project_id, ledger=ledger)

@@ -417,7 +417,7 @@ def pull(
     repo_root: Path | str,
     clone: Path | str,
     project_id: str,
-    ledger: dict[str, str] | None = None,
+    ledger: dict[str, bytes] | None = None,
 ) -> str:
     """Import from a Git vault: fast-forward the clone, then import locally.
 

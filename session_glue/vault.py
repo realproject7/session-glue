@@ -722,12 +722,17 @@ class LocalWrite:
 
     def __init__(self, history_dir: Path) -> None:
         self.history_dir = Path(history_dir)
-        self._staged: dict[str, str] = {}
+        self._staged: dict[str, bytes] = {}
 
     def stage(self, relative_path: str, text: str) -> None:
-        self._staged[relative_path] = text
+        # Encoded once, here: `staged()` is the ownership proof the rollback
+        # compares against raw disk bytes, so the recorded value has to *be* the
+        # bytes `commit` writes rather than a string something re-encodes later.
+        # Re-deriving it at comparison time assumes the write used no newline
+        # translation — true of `commit`, and an assumption nothing enforced.
+        self._staged[relative_path] = text.encode("utf-8")
 
-    def staged(self) -> dict[str, str]:
+    def staged(self) -> dict[str, bytes]:
         """A copy of what has been staged: the transaction ledger's contents (#124)."""
         return dict(self._staged)
 
@@ -753,7 +758,7 @@ class LocalWrite:
                 _prepare_target(self.history_dir, target)
                 original = target.read_bytes() if target.is_file() else None
                 applied.append((target, original))
-                target.write_text(self._staged[relative_path], encoding="utf-8", newline="\n")
+                target.write_bytes(self._staged[relative_path])
         except Exception:
             for target, original in reversed(applied):
                 if original is None:
@@ -1450,7 +1455,7 @@ def snapshot_local_artifacts(repo_root: Path | str) -> dict[str, bytes | None]:
 def restore_local_artifacts(
     repo_root: Path | str,
     snapshot: dict[str, bytes | None],
-    ledger: dict[str, str] | None,
+    ledger: dict[str, bytes] | None,
 ) -> tuple[list[str], list[str]]:
     """Put the non-archive artifacts back; report collisions and write failures.
 
@@ -1568,7 +1573,7 @@ def snapshot_local_archives(repo_root: Path | str) -> dict[str, bytes]:
 def restore_local_archives(
     repo_root: Path | str,
     baseline: dict[str, bytes],
-    ledger: dict[str, str] | None,
+    ledger: dict[str, bytes] | None,
     skip: set[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Return the active archive set to its pre-command bytes and presence.
@@ -1624,7 +1629,7 @@ def restore_quarantined(
     repo_root: Path | str,
     quarantine: Path,
     moved: list[str],
-    ledger: dict[str, str] | None = None,
+    ledger: dict[str, bytes] | None = None,
 ) -> RestoreOutcome:
     """Move quarantined archives back, and report everything that could not return.
 
@@ -1687,7 +1692,7 @@ def restore_quarantined(
 
 
 def _is_own_materialization(
-    root: Path, target: Path, relative_path: str, ledger: dict[str, str] | None
+    root: Path, target: Path, relative_path: str, ledger: dict[str, bytes] | None
 ) -> bool:
     """True when *target* is this invocation's own write, unchanged since.
 
@@ -1703,7 +1708,7 @@ def _is_own_materialization(
         return False
     guard_contained_path(root, target)
     try:
-        return target.read_bytes() == ledger[relative_path].encode("utf-8")
+        return target.read_bytes() == ledger[relative_path]
     except OSError:
         # Unreadable is "cannot prove it is ours", which is the safe answer.
         return False
@@ -1973,7 +1978,7 @@ def import_project(
     vault_root: Path | str,
     project_id: str,
     admitted: set[str] | None = None,
-    ledger: dict[str, str] | None = None,
+    ledger: dict[str, bytes] | None = None,
 ) -> str:
     """Import the vault into the local history; return the resulting state digest."""
     root = Path(repo_root)
@@ -2058,7 +2063,7 @@ def _materialize_local(
     archives: dict[str, str],
     derived: dict[str, str],
     decisions: str,
-    ledger: dict[str, str] | None = None,
+    ledger: dict[str, bytes] | None = None,
 ) -> None:
     """Replace local history with *archives* and *derived*, staged and reversible.
 
@@ -2117,7 +2122,7 @@ def write_sync_state(
     repo_root: Path,
     project_id: str,
     digest: str,
-    ledger: dict[str, str] | None = None,
+    ledger: dict[str, bytes] | None = None,
 ) -> None:
     """Record the baseline as the final local write of a successful operation.
 
@@ -2142,10 +2147,10 @@ def write_sync_state(
     path = sync_state_path(repo_root)
     guard_contained_path(root, path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = render_sync_state(project_id, digest)
+    payload = render_sync_state(project_id, digest).encode("utf-8")
     if ledger is not None:
-        ledger[SYNC_STATE_FILENAME] = text
-    _atomic_write(root, path, text.encode("utf-8"))
+        ledger[SYNC_STATE_FILENAME] = payload
+    _atomic_write(root, path, payload)
 
 
 # --------------------------------------------------------------------------- #
