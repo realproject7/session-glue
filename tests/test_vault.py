@@ -912,7 +912,7 @@ def test_every_vault_helper_reaching_the_filesystem_guards_containment():
         ".iterdir(", ".glob(", ".mkdir(", ".unlink(",
     )
     guards = (
-        "guard_contained_path", "_reject_symlink_at", "_prepare_target",
+        "guard_contained_path", "reject_symlink", "_prepare_target",
         "_write_recorded", "_read_text(",
     )
 

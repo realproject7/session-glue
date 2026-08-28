@@ -567,13 +567,6 @@ def render_sync_state(project_id: str, last_remote_state_sha256: str) -> str:
 _REPLACE_TAIL = ("DECISIONS.md", "LATEST.md", "INDEX.yaml", "RESUME_PROMPT.txt")
 
 
-def _reject_symlink_at(path: Path) -> None:
-    """Refuse a symlink at exactly this path, for a target that *is* the root."""
-    from . import writer
-
-    writer.reject_symlink(Path(path))
-
-
 def guard_contained_path(containment_root: Path, target: Path) -> None:
     """Reject a symlink at *any* level from ``containment_root`` down to ``target``.
 
@@ -988,8 +981,12 @@ def read_state_local(repo_root: Path | str) -> dict[str, Any]:
 
 def _namespace_is_empty(namespace: Path) -> bool:
     """True when ``projects/<id>/`` is absent or holds nothing."""
+    from . import writer
+
     path = Path(namespace)
-    _reject_symlink_at(path)
+    # The namespace *is* the root here, so `guard_contained_path`'s relative
+    # form does not apply; its ancestry is already proven in `project_dir`.
+    writer.reject_symlink(path)
     if not path.exists():
         return True
     return not any(path.iterdir())
