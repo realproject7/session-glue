@@ -898,12 +898,35 @@ def read_state_local(repo_root: Path | str) -> dict[str, Any]:
     return {"lifecycle": lifecycle}
 
 
-def _namespace_is_bootstrap(namespace: Path) -> bool:
-    """True when ``projects/<id>/`` is absent or empty — the first-push case."""
+def namespace_is_empty(namespace: Path) -> bool:
+    """True when ``projects/<id>/`` is absent or holds nothing."""
     path = Path(namespace)
     if not path.exists():
         return True
     return not any(path.iterdir())
+
+
+def _namespace_is_bootstrap(namespace: Path, sync_state: dict[str, Any] | None) -> bool:
+    """True only for a genuine first push — an empty namespace *and* no baseline.
+
+    Keying this on the vault side alone would reopen the transport's defining
+    failure: on a sync-client folder "never existed" and "not yet materialized"
+    are indistinguishable from there. A caller holding a
+    ``last_remote_state_sha256`` for this project has demonstrably synced a real
+    vault before, so an absent namespace is unavailability rather than a first
+    push. A device with no stored digest still cannot tell the two apart — that
+    residue is irreducible, and v1 answers it with user-serialized operation
+    rather than a lock.
+    """
+    if not namespace_is_empty(namespace):
+        return False
+    if sync_state and sync_state.get("last_remote_state_sha256"):
+        raise VaultUnavailable(
+            f"vault not fully available: {namespace} is absent or empty, but this "
+            "checkout has synced this project before; wait for the sync client "
+            "rather than re-initializing"
+        )
+    return True
 
 
 def _require_populated_namespace(namespace: Path, project_id: str) -> None:
@@ -1009,7 +1032,7 @@ def export_project(
         raise VaultError("local history has no archives to export")
     canonical = {path: canonicalize_document(text) for path, text in local_archives.items()}
 
-    bootstrap = _namespace_is_bootstrap(namespace)
+    bootstrap = _namespace_is_bootstrap(namespace, read_sync_state(root))
     if not bootstrap:
         _require_populated_namespace(namespace, project_id)
     vault_archives = {} if bootstrap else read_vault_archives(namespace)
@@ -1089,7 +1112,7 @@ def import_project(repo_root: Path | str, vault_root: Path | str, project_id: st
     root = Path(repo_root)
     require_project_id(root, project_id)
     namespace = project_dir(Path(vault_root), project_id)
-    if _namespace_is_bootstrap(namespace):
+    if namespace_is_empty(namespace):
         raise VaultUnavailable(
             f"vault not fully available: {namespace} is absent or empty"
         )
