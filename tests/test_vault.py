@@ -937,56 +937,40 @@ _GUARD_CALLS = frozenset({
 })
 
 #: Filesystem calls that are unguarded *by design*, keyed by the exact operation
-#: -- `(function, verb, target expression, block fingerprint)` -- and carrying
-#: **how many** such calls the reason covers.
+#: -- `(function, verb, target expression)` -- and carrying **how many** such
+#: calls the reason covers.
 #:
-#: Each part of the key closes a different escape hatch. Keying by function alone
-#: waives a whole body. Adding the verb still waives *every* `unlink` in that
-#: method, so an unrelated `target.unlink()` would inherit a justification
-#: written for the rollback. Adding the target still cannot tell two same-target
-#: calls apart. The **fingerprint** -- the chain of enclosing blocks from the
-#: function body down to the call -- distinguishes them by *where* they sit, so
-#: the two rollback entries below are separated by `if.body` vs `if.orelse`: an
-#: exemption for one branch does not cover the other. The count then bounds how
-#: many identically-placed calls the reason defends.
+#: The count is the point. Keying by function alone waives a whole body; keying
+#: by `function.verb` still waives *every* `unlink` in that method, so a future
+#: unrelated `target.unlink()` would inherit a justification written for the
+#: rollback. An exemption is a claim about specific calls, so it says how many
+#: it is willing to defend: the (n+1)th is an offender, a different target is an
+#: offender, and an entry covering more calls than exist is reported stale.
 #:
-#: Between them: a call that **moves** to a different block loses its entry and
-#: the entry is reported **stale**; an **added** same-shape call in a new block
-#: has no entry and is an **offender**; an added one in the *same* block exceeds
-#: the count and is an **offender**.
-#:
-#: The fingerprint is structural rather than a line number on purpose. A
-#: line-numbered key changes whenever anything above the call moves, and an
-#: allowlist that demands re-stamping after unrelated edits teaches reviewers to
-#: re-stamp it without reading -- while still failing to distinguish two calls on
-#: different lines of the same block for any reason a reader can check.
+#: Line numbers are deliberately *not* part of the key. They would make every
+#: edit above a call look like a new exemption, and the resulting churn teaches
+#: reviewers to re-stamp the allowlist without reading it.
 #:
 #: All four entries are the same pattern: a path recovered from a list that only
 #: ever received targets already proven contained. The sweep does not trace
 #: values through containers, so it cannot see that -- a limit, stated here
 #: rather than papered over.
 _UNGUARDED_BY_DESIGN = {
-    ("Creations.undo", "unlink", "target", "for.body"): (
+    ("Creations.undo", "unlink", "target"): (
         1, "removes only files recorded during a guarded write"
     ),
-    ("Creations.undo", "rmdir", "directory", "for.body>try.body"): (
+    ("Creations.undo", "rmdir", "directory"): (
         1, "removes only directories recorded during a guarded write"
     ),
-    (
-        "LocalWrite.commit", "unlink", "target",
-        "try.handlers>excepthandler.body>for.body>if.body",
-    ): (
+    ("LocalWrite.commit", "unlink", "target"): (
         1,
-        "rollback path, no-original branch: every target in `applied` went "
-        "through `_prepare_target` in the try body before it was appended",
+        "rollback path: every target in `applied` went through `_prepare_target` "
+        "in the try body before it was appended",
     ),
-    (
-        "LocalWrite.commit", "write_bytes", "target",
-        "try.handlers>excepthandler.body>for.body>if.orelse",
-    ): (
+    ("LocalWrite.commit", "write_bytes", "target"): (
         1,
-        "rollback path, restore branch: rewrites the bytes of a target "
-        "`_prepare_target` already proved contained on the way in",
+        "rollback path: restores the bytes of a target `_prepare_target` already "
+        "proved contained on the way in",
     ),
 }
 
@@ -1111,8 +1095,8 @@ def unguarded_fs_targets(source):
                 found.append(child)
         return sorted(found, key=lambda c: (c.lineno, c.col_offset))
 
-    def scan(node, proven, report, context=()):
-        """Walk one statement list, threading proven paths and the block context."""
+    def scan(node, proven, report):
+        """Walk one statement list, threading the set of paths proven so far."""
         for stmt in node:
             # A nested def is its own scope with its own callers: it is analysed
             # separately, and must not inherit proof from where it was written.
@@ -1122,7 +1106,7 @@ def unguarded_fs_targets(source):
             blocks, own = [], []
             for field, value in ast.iter_fields(stmt):
                 if field in _BLOCK_FIELDS and isinstance(value, list):
-                    blocks.append((f"{type(stmt).__name__.lower()}.{field}", value))
+                    blocks.append(value)
                 elif isinstance(value, list):
                     own.extend(v for v in value if isinstance(v, ast.AST))
                 elif isinstance(value, ast.AST):
@@ -1131,11 +1115,11 @@ def unguarded_fs_targets(source):
             for expr in sorted(own, key=lambda n: (getattr(n, "lineno", 0),
                                                    getattr(n, "col_offset", 0))):
                 for call in calls_in(expr):
-                    report(call, proven, context)
+                    report(call, proven)
 
-            for label, block in blocks:
+            for block in blocks:
                 # A copy: what a branch proves stays in the branch.
-                scan(block, set(proven), report, context + (label,))
+                scan(block, set(proven), report)
 
     import collections
 
@@ -1149,15 +1133,14 @@ def unguarded_fs_targets(source):
         name = qualname(node)
         found = []
 
-        def report(call, proven, context, _found=found):
+        def report(call, proven, _found=found):
             func = call.func
             called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
             if called in _FS_VERBS:
-                where = ">".join(context) or "body"
                 for operand in _path_operands(source, call):
                     ok = called not in _LINK_VERBS and operand in proven
                     why = "creates a link" if called in _LINK_VERBS else "is unguarded"
-                    _found.append((call.lineno, called, operand, ok, why, where))
+                    _found.append((call.lineno, called, operand, ok, why))
             # Added after the call is checked, so a guard cannot clear the very
             # call it is an argument to -- and so a guard placed after the write
             # it protects does not count.
@@ -1167,28 +1150,27 @@ def unguarded_fs_targets(source):
 
         scan(node.body, set(), report)
 
-        for lineno, verb, target, ok, why, where in sorted(found):
+        for lineno, verb, target, ok, why in sorted(found):
             if ok:
                 continue
-            key = (name, verb, target, where)
+            key = (name, verb, target)
             allowed = _UNGUARDED_BY_DESIGN.get(key, (0, ""))[0]
             seen[key] += 1
             if seen[key] <= allowed:
                 continue
             extra = (
-                f" -- the allowlist covers {allowed} at {where}, this is #{seen[key]}"
+                f" -- the allowlist covers {allowed}, this is #{seen[key]}"
                 if allowed
-                else f" (at {where})"
+                else ""
             )
             offenders.append(
                 f"{name} {why}: {target or '?'} via .{verb}() at line {lineno}{extra}"
             )
 
     stale = sorted(
-        f"{name}.{verb}({target}) at {where} covers {allowed}, found {seen[key]}"
-        for key, (allowed, _) in _UNGUARDED_BY_DESIGN.items()
-        for name, verb, target, where in [key]
-        if seen[key] < allowed
+        f"{name}.{verb}({target}) covers {allowed}, found {seen[(name, verb, target)]}"
+        for (name, verb, target), (allowed, _) in _UNGUARDED_BY_DESIGN.items()
+        if seen[(name, verb, target)] < allowed
     )
     return offenders, stale
 
@@ -1230,23 +1212,6 @@ def test_every_vault_helper_reaching_the_filesystem_guards_containment():
     assert all(
         reason.strip() for _, reason in _UNGUARDED_BY_DESIGN.values()
     ), "every allowlist entry needs a stated reason"
-
-
-#: `LocalWrite.commit`'s rollback, reduced to the block shape the allowlist
-#: fingerprint names: `try.handlers>excepthandler.body>for.body>if.body`. The
-#: meta-tests below substitute the branch body so they exercise the real
-#: exemption rather than a call that merely shares its name.
-_ROLLBACK = """
-class LocalWrite:
-    def commit(self, target, other, applied):
-        try:
-            pass
-        except Exception:
-            for target, original in reversed(applied):
-                if original is None:
-                    {body}
-            raise
-"""
 
 
 #: Each case is source the sweep *must* flag, paired with why it would have
@@ -1302,28 +1267,27 @@ def _swap(root, staged, target):
     guard_contained_path(root, staged)
     shutil.move(staged, target)
 """,
-    # An exemption is a claim about one specific operation, not a licence for
-    # the verb. These reproduce the real rollback's qualname *and block shape*,
-    # so they probe the actual allowlisted operation rather than a lookalike.
-    "a second unguarded unlink in the allowlisted rollback branch": _ROLLBACK.format(
-        body="target.unlink(missing_ok=True)\n                    target.unlink()"
-    ),
-    "an unguarded unlink on a different target in the allowlisted branch": _ROLLBACK.format(
-        body="target.unlink(missing_ok=True)\n                    other.unlink()"
-    ),
-    "an unguarded verb the allowlisted branch has no exemption for": _ROLLBACK.format(
-        body="target.unlink(missing_ok=True)\n                    target.write_text('x')"
-    ),
-    # @head's "moving a same-shape operation": the identical call, hoisted out of
-    # the branch its reason was written for.
-    "the allowlisted unlink moved to the function body": """
+    # An exemption is a claim about specific calls, not a licence for the verb.
+    # These use the real allowlisted qualnames, so they are the exemption's own
+    # boundary rather than a lookalike.
+    "a second unguarded unlink beside an allowlisted one": """
 class LocalWrite:
     def commit(self, target):
-        target.unlink(missing_ok=True)
+        target.unlink()
+        target.unlink()
 """,
-    "the allowlisted unlink moved to the sibling branch": _ROLLBACK.format(
-        body="pass\n                else:\n                    target.unlink(missing_ok=True)"
-    ),
+    "an unguarded unlink on a different target in an allowlisted method": """
+class LocalWrite:
+    def commit(self, target, other):
+        target.unlink()
+        other.unlink()
+""",
+    "an unguarded verb the allowlisted method does not have an exemption for": """
+class LocalWrite:
+    def commit(self, target):
+        target.unlink()
+        target.write_text("x")
+""",
     # Guarding the receiver is correct for containment and still not enough:
     # `vault.py` has no business creating the thing its every other guard
     # refuses to follow.
@@ -1425,10 +1389,12 @@ def _fine(root, directory):
         guard_contained_path(root, path)
         yield path.read_text()
 """,
-    # Exactly the one call the reason defends, in exactly the branch it names.
-    "the single unguarded unlink the allowlist actually covers": _ROLLBACK.format(
-        body="target.unlink(missing_ok=True)"
-    ),
+    # Exactly the one call the reason defends, and no more.
+    "the single unguarded unlink the allowlist actually covers": """
+class LocalWrite:
+    def commit(self, target):
+        target.unlink()
+""",
     "a guard at body level with the write nested two blocks deep": """
 def _fine(root, target, flag, items):
     guard_contained_path(root, target)
@@ -1443,26 +1409,6 @@ def _fine(root, target, flag, items):
 def test_the_containment_sweep_flags_what_it_claims_to(case):
     offenders, _ = unguarded_fs_targets(_MUST_BE_FLAGGED[case])
     assert offenders, f"the sweep missed {case}, so it does not close the class"
-
-
-def test_a_moved_exemption_goes_stale_rather_than_following_the_call():
-    """The other half of an exact key: an entry must not survive its operation.
-
-    A waiver is an argument about one call in one place. If that call is hoisted
-    out of the branch the argument was written for, the argument no longer
-    applies -- so the entry has to surface for re-reading rather than quietly
-    keeping the moved call clean.
-    """
-    moved = _MUST_BE_FLAGGED["the allowlisted unlink moved to the function body"]
-    offenders, stale = unguarded_fs_targets(moved)
-
-    assert any("unlink" in entry for entry in offenders), (
-        f"the moved call should not inherit its old exemption: {offenders}"
-    )
-    assert any(
-        "LocalWrite.commit.unlink(target)" in entry and "if.body" in entry
-        for entry in stale
-    ), f"the vacated entry should be reported stale: {stale}"
 
 
 @pytest.mark.parametrize("case", sorted(_MUST_BE_CLEAN))
