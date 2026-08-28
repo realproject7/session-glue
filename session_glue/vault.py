@@ -587,7 +587,17 @@ def _prepare_target(
 
     guard_write_path(containment_root, target)
     if created_dirs is not None:
-        missing = [p for p in [target.parent, *target.parent.parents] if not p.exists()]
+        # Bounded at the containment root explicitly. Nothing above it can be
+        # missing today — a folder vault must already exist and a clone must be
+        # a real worktree — but in a rollback whose whole contract is "remove
+        # only what you created", the bound belongs in the code rather than in a
+        # precondition somewhere else.
+        root = Path(containment_root)
+        missing = [
+            p
+            for p in [target.parent, *target.parent.parents]
+            if not p.exists() and p != root and root in p.parents
+        ]
         created_dirs.extend(reversed(missing))
     target.parent.mkdir(parents=True, exist_ok=True)
     writer.assert_within(target.parent, Path(containment_root).resolve())

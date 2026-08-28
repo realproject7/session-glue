@@ -475,7 +475,7 @@ def test_resolve_over_git_commits_once_and_retains_the_candidate(checkout, clone
 # --------------------------------------------------------------------------- #
 
 
-def _fault_at(monkeypatch, target_name, *, after_write=True):
+def _fault_at(monkeypatch, target_name):
     """Make publication fail once it has written ``target_name``.
 
     Faults *within* the publication sequence rather than before it, so the
@@ -485,10 +485,8 @@ def _fault_at(monkeypatch, target_name, *, after_write=True):
     real = vault._write_recorded
 
     def failing(root, target, text, record):
-        if Path(target).name == target_name and not after_write:
-            raise vault.VaultError("injected publication fault")
         real(root, target, text, record)
-        if Path(target).name == target_name and after_write:
+        if Path(target).name == target_name:
             raise vault.VaultError("injected publication fault")
 
     monkeypatch.setattr(vault, "_write_recorded", failing)
@@ -577,7 +575,7 @@ def test_ahead_remote_publication_fault_keeps_device_b_and_drops_our_artifacts(
     tmp_path, checkout, clone, bare_remote, monkeypatch
 ):
     """AC1 + the approved rollback target: B's fetched commit must survive."""
-    assert vaultgit.push(checkout, clone, "alpha") 
+    assert vaultgit.push(checkout, clone, "alpha")
     baseline = vault.sync_state_path(checkout).read_bytes()
 
     other = _clone(bare_remote, tmp_path / "other")
@@ -627,3 +625,32 @@ def test_project_id_mismatch_rejects_before_any_clone_mutation(
 
     # The clone never moved: no fetch-driven fast-forward happened.
     assert _git(clone, "rev-parse", "HEAD").stdout.strip() == before_head
+
+
+def test_stage_or_commit_failure_removes_artifacts_that_never_reached_a_commit(
+    monkeypatch, checkout, clone
+):
+    """The one rollback branch `git reset --hard` cannot cover.
+
+    Publication succeeds, so the artifacts are on disk; `git add`/`git commit`
+    then fails, so they were never committed and are therefore untracked. A
+    reset restores tracked bytes and leaves them exactly where they are — the
+    recorded created-set is the only thing that removes them. That is #87's
+    "a failed Git operation restores the clone to its exact pre-operation file
+    set", and it is a different branch from a fault *inside* publication.
+    """
+    before_tracked, before_untracked = _tracked_and_untracked(clone)
+    before_head = _git(clone, "rev-parse", "HEAD").stdout.strip()
+
+    def refuse(*args, **kwargs):
+        raise vaultgit.GitVaultError("not a Git working tree: cannot stage")
+
+    monkeypatch.setattr(vaultgit, "stage_commit_push", refuse)
+    with pytest.raises(vaultgit.GitVaultError):
+        vaultgit.push(checkout, clone, "alpha")
+
+    assert _tracked_and_untracked(clone) == (before_tracked, before_untracked)
+    assert _git(clone, "status", "--porcelain").stdout == ""
+    assert _git(clone, "rev-parse", "HEAD").stdout.strip() == before_head
+    assert not (clone / vault.PROJECTS_DIRNAME / "alpha").exists()
+    assert vault.read_sync_state(checkout) is None
