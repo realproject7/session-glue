@@ -1016,8 +1016,13 @@ def export_project(
     project_id: str,
     acknowledgements: list[dict[str, Any]] | None = None,
     fault_after: int | None = None,
+    write_local_state: bool = True,
 ) -> str:
     """Export the local history into the vault; return the resulting state digest.
+
+    ``write_local_state=False`` leaves the local baseline untouched so a
+    transport with a later success condition — #80's upstream push — can record
+    it only once that condition holds.
 
     Refuses before any write on: a project-id mismatch, an out-of-repo project
     root, a marker-less populated namespace, a privacy finding without its exact
@@ -1101,7 +1106,8 @@ def export_project(
              fault_after=fault_after)
 
     digest = state_digest(new_state)
-    _write_sync_state(root, project_id, digest)
+    if write_local_state:
+        write_sync_state(root, project_id, digest)
     return digest
 
 
@@ -1150,7 +1156,7 @@ def import_project(repo_root: Path | str, vault_root: Path | str, project_id: st
     write.commit()
 
     digest = state_digest(vault_state)
-    _write_sync_state(root, project_id, digest)
+    write_sync_state(root, project_id, digest)
     return digest
 
 
@@ -1167,8 +1173,15 @@ def _read_text(path: Path) -> str:
         return ""
 
 
-def _write_sync_state(repo_root: Path, project_id: str, digest: str) -> None:
-    """Final local write of a fully successful operation."""
+def write_sync_state(repo_root: Path, project_id: str, digest: str) -> None:
+    """Record the baseline as the final local write of a successful operation.
+
+    Public because the Git transport (issue #80) must *defer* it until the exact
+    upstream push succeeds: in Git mode the vault is the remote, so a local
+    commit that has not been pushed is not a vault change that succeeded, and
+    advancing the digest there records a baseline the other device can never
+    observe.
+    """
     path = sync_state_path(repo_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_sync_state(project_id, digest), encoding="utf-8", newline="\n")
@@ -1251,6 +1264,7 @@ def resolve_project(
     archive_choices: dict[str, str] | None = None,
     lifecycle_choices: dict[str, str] | None = None,
     acknowledgements: list[dict[str, Any]] | None = None,
+    write_local_state: bool = True,
 ) -> str:
     """Resolve every named conflict with explicit selectors and publish the result.
 
@@ -1349,5 +1363,6 @@ def resolve_project(
     }
     _publish(Path(vault_root), namespace, content, new_state, project_id)
     digest = state_digest(new_state)
-    _write_sync_state(root, project_id, digest)
+    if write_local_state:
+        write_sync_state(root, project_id, digest)
     return digest
