@@ -3059,8 +3059,12 @@ def test_a_still_matching_transaction_owned_target_is_replaced(checkout):
     """
     quarantine, moved = _quarantined(checkout)
     sessions = checkout / writer.AGENT_HISTORY_DIRNAME / vault.SESSIONS_DIRNAME
-    materialized = "the bytes this operation wrote\n"
-    (sessions / "000-earlier.md").write_text(materialized, encoding="utf-8")
+    # Written as bytes, and recorded as the same bytes: this stands in for a
+    # transaction write, and `LocalWrite` records exactly what it writes. Using
+    # `write_text` here translated newlines on Windows while the ledger value
+    # did not, so the fixture claimed ownership of a file it had not written.
+    materialized = b"the bytes this operation wrote\n"
+    (sessions / "000-earlier.md").write_bytes(materialized)
     ledger = {"sessions/000-earlier.md": materialized}
 
     outcome = vault.restore_quarantined(checkout, quarantine, moved, ledger)
@@ -3157,8 +3161,8 @@ def test_a_failed_rollback_write_leaves_no_staging_residue(checkout, monkeypatch
     """
     history = checkout / writer.AGENT_HISTORY_DIRNAME
     snapshot = vault.snapshot_local_artifacts(checkout)
-    (history / "INDEX.yaml").write_text("rewritten by this operation\n", encoding="utf-8")
-    ledger = {"INDEX.yaml": "rewritten by this operation\n"}
+    (history / "INDEX.yaml").write_bytes(b"rewritten by this operation\n")
+    ledger = {"INDEX.yaml": b"rewritten by this operation\n"}
     real = os.replace
 
     def failing(source, target):
@@ -3232,8 +3236,8 @@ def test_a_failed_removal_is_reported_in_the_same_bucket(checkout, monkeypatch):
     (history / absent).unlink(missing_ok=True)
     snapshot = vault.snapshot_local_artifacts(checkout)
     assert snapshot[absent] is None, "the fixture must start with the file absent"
-    created = "created by this operation\n"
-    (history / absent).write_text(created, encoding="utf-8")
+    created = b"created by this operation\n"
+    (history / absent).write_bytes(created)
     ledger = {absent: created}
 
     import pathlib
@@ -3262,8 +3266,8 @@ def test_failed_does_not_imply_an_empty_target(checkout, monkeypatch):
     name = "RESUME_PROMPT.txt"
     (history / name).unlink(missing_ok=True)
     snapshot = vault.snapshot_local_artifacts(checkout)
-    created = "created by this operation\n"
-    (history / name).write_text(created, encoding="utf-8")
+    created = b"created by this operation\n"
+    (history / name).write_bytes(created)
     monkeypatch.setattr(
         pathlib.Path, "unlink",
         lambda self, *a, **k: (_ for _ in ()).throw(OSError("injected")),
@@ -3275,3 +3279,56 @@ def test_failed_does_not_imply_an_empty_target(checkout, monkeypatch):
     # The defining point: the target is occupied, and it is still not a collision.
     assert (history / name).exists()
     assert collisions == []
+
+
+def test_the_ledger_records_exactly_the_bytes_committed(tmp_path):
+    """The invariant every ownership proof rests on (#126).
+
+    `_is_own_materialization` compares raw disk bytes against the ledger, so the
+    ledger must hold what `commit` actually wrote — not a string something
+    re-encodes at comparison time. That re-encoding assumed the write used no
+    newline translation: true of `LocalWrite`, false of `writer.create_handoff`
+    two modules over, and enforced by nothing. On a platform where the writer
+    translates, every transaction write reads as an external collision.
+    """
+    history = tmp_path / writer.AGENT_HISTORY_DIRNAME
+    (history / vault.SESSIONS_DIRNAME).mkdir(parents=True)
+    write = vault.LocalWrite(history)
+    write.stage("INDEX.yaml", "schema_version: 1\nlatest_session: x\n")
+    write.stage(f"{vault.SESSIONS_DIRNAME}/x.md", "---\nsession_id: x\n---\n\nbody\n")
+    recorded = write.staged()
+
+    write.commit()
+
+    assert recorded, "the fixture must stage something"
+    for name, payload in recorded.items():
+        assert (history / name).read_bytes() == payload, (
+            f"the ledger's record of {name} is not the bytes that were written"
+        )
+
+
+def test_a_newline_translated_occupant_is_not_this_transactions_write(checkout):
+    """Raw-byte external-change detection, which the ownership proof must keep.
+
+    A CRLF file and the LF bytes we recorded are the same *string* and different
+    *files*. Comparing decoded text called them equal and replaced the occupant —
+    which is #93's rule inverted: someone else's rewrite, read as our own.
+
+    This is the control against "fixing" a newline mismatch by comparing
+    normalised text again, which would pass CI and reopen the hole.
+    """
+    quarantine, moved = _quarantined(checkout)
+    sessions = checkout / writer.AGENT_HISTORY_DIRNAME / vault.SESSIONS_DIRNAME
+    recorded = b"line one\nline two\n"
+    (sessions / "000-earlier.md").write_bytes(recorded.replace(b"\n", b"\r\n"))
+
+    outcome = vault.restore_quarantined(
+        checkout, quarantine, moved, {"sessions/000-earlier.md": recorded}
+    )
+
+    assert outcome.collisions == ["sessions/000-earlier.md"], (
+        "a CRLF occupant was accepted as this transaction's LF write"
+    )
+    assert (sessions / "000-earlier.md").read_bytes() == recorded.replace(b"\n", b"\r\n"), (
+        "the external occupant was overwritten"
+    )

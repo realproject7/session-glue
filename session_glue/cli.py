@@ -785,12 +785,17 @@ def _cmd_sync_recover_duplicates(args: argparse.Namespace) -> int:
         # and the sync state restored to exact pre-command bytes, and only a
         # record taken now describes the state the operator actually had.
         snapshot = vault.snapshot_local_artifacts(root)
+        # The archive half of the same baseline (#126). `import_project`
+        # materializes every vault archive, so a vault-unique archive absent
+        # locally beforehand is this transaction's creation and must not outlive
+        # its failure — and only bytes captured now can prove that.
+        archive_baseline = vault.snapshot_local_archives(root)
         quarantine, moved = vault.quarantine_duplicates(root, duplicates, stamp)
         print(f"quarantined {len(moved)} archive(s) under {quarantine}")
         # The transaction ledger: every artifact this invocation materializes,
         # with the bytes it wrote. The rollback may replace only what it can
         # prove it wrote and that still matches (#124).
-        ledger: dict[str, str] = {}
+        ledger: dict[str, bytes] = {}
         try:
             if clone_path is not None:
                 return vaultgit.pull(root, clone_path, args.project_id, ledger=ledger)
@@ -802,6 +807,13 @@ def _cmd_sync_recover_duplicates(args: argparse.Namespace) -> int:
             # a vault that goes away between the check and the read, a sync-state
             # write that fails after materialization already landed.
             outcome = vault.restore_quarantined(root, quarantine, moved, ledger)
+            # `moved` is skipped: those paths are the quarantine's to return, and
+            # handling one path in both mechanisms would have them fight over it.
+            archive_collisions, archive_failures = vault.restore_local_archives(
+                root, archive_baseline, ledger, set(moved)
+            )
+            outcome.collisions.extend(archive_collisions)
+            outcome.failed.extend(archive_failures)
             artifact_collisions, artifact_failures = vault.restore_local_artifacts(
                 root, snapshot, ledger
             )

@@ -722,12 +722,17 @@ class LocalWrite:
 
     def __init__(self, history_dir: Path) -> None:
         self.history_dir = Path(history_dir)
-        self._staged: dict[str, str] = {}
+        self._staged: dict[str, bytes] = {}
 
     def stage(self, relative_path: str, text: str) -> None:
-        self._staged[relative_path] = text
+        # Encoded once, here: `staged()` is the ownership proof the rollback
+        # compares against raw disk bytes, so the recorded value has to *be* the
+        # bytes `commit` writes rather than a string something re-encodes later.
+        # Re-deriving it at comparison time assumes the write used no newline
+        # translation — true of `commit`, and an assumption nothing enforced.
+        self._staged[relative_path] = text.encode("utf-8")
 
-    def staged(self) -> dict[str, str]:
+    def staged(self) -> dict[str, bytes]:
         """A copy of what has been staged: the transaction ledger's contents (#124)."""
         return dict(self._staged)
 
@@ -753,7 +758,7 @@ class LocalWrite:
                 _prepare_target(self.history_dir, target)
                 original = target.read_bytes() if target.is_file() else None
                 applied.append((target, original))
-                target.write_text(self._staged[relative_path], encoding="utf-8", newline="\n")
+                target.write_bytes(self._staged[relative_path])
         except Exception:
             for target, original in reversed(applied):
                 if original is None:
@@ -1401,7 +1406,7 @@ def _recovery_outcome_detail(outcome: "RestoreOutcome", quarantine: Path) -> str
     return "; " + "; ".join(parts)
 
 
-def snapshot_local_artifacts(repo_root: Path | str) -> dict[str, str | None]:
+def snapshot_local_artifacts(repo_root: Path | str) -> dict[str, bytes | None]:
     """Pre-command bytes of every non-archive artifact recovery may replace.
 
     AC3 requires derived views, decisions *and* the sync state restored to exact
@@ -1410,6 +1415,15 @@ def snapshot_local_artifacts(repo_root: Path | str) -> dict[str, str | None]:
     presence means removing a file this invocation created.
 
     Taken before the first move, so it describes the state the operator had.
+
+    **Raw bytes, not decoded text** (#126). `read_text` normalises newlines, so a
+    CRLF artifact snapshotted as text came back LF-only — a rollback that
+    promises exact pre-command bytes and silently rewrites every line ending.
+
+    **Unreadable is not absent** (#126). Mapping a decode or I/O failure to
+    `None` said "absent before", and restoring presence from `None` *deletes*.
+    Reading bytes removes the decode case entirely; a genuine I/O failure now
+    refuses here, before the first move, rather than arming that deletion.
     """
     from . import writer
 
@@ -1423,16 +1437,25 @@ def snapshot_local_artifacts(repo_root: Path | str) -> dict[str, str | None]:
         target = history_dir / name
         guard_contained_path(root, target)
         try:
-            snapshot[name] = target.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            snapshot[name] = target.read_bytes()
+        except FileNotFoundError:
             snapshot[name] = None
+        except OSError as exc:
+            # AC4's second branch: refuse *before any mutation*. Nothing has
+            # moved yet, so raising here leaves the history untouched, which is
+            # the outcome a baseline we cannot read can no longer guarantee.
+            raise VaultError(
+                f"cannot read the pre-command state of {name}: {exc}. "
+                "Recovery refuses rather than proceed without a baseline it "
+                "could restore from; nothing was moved."
+            ) from exc
     return snapshot
 
 
 def restore_local_artifacts(
     repo_root: Path | str,
-    snapshot: dict[str, str | None],
-    ledger: dict[str, str] | None,
+    snapshot: dict[str, bytes | None],
+    ledger: dict[str, bytes] | None,
 ) -> tuple[list[str], list[str]]:
     """Put the non-archive artifacts back; report collisions and write failures.
 
@@ -1471,21 +1494,25 @@ def restore_local_artifacts(
     return collisions, failed
 
 
-def _reads_as(root: Path, target: Path, expected: str | None) -> bool:
+def _reads_as(root: Path, target: Path, expected: bytes | None) -> bool:
     """True when *target* already holds *expected* — nothing to restore.
 
     ``root`` so the read is guarded in this body, not one call away (#88).
+
+    Compares raw bytes (#126): a CRLF original and its LF normalisation are the
+    same string and different files, and this decides whether an occupant is
+    left alone.
     """
     if expected is None:
         return False
     guard_contained_path(root, target)
     try:
-        return target.read_text(encoding="utf-8") == expected
-    except (OSError, UnicodeDecodeError):
+        return target.read_bytes() == expected
+    except OSError:
         return False
 
 
-def _atomic_write(root: Path, target: Path, text: str) -> None:
+def _atomic_write(root: Path, target: Path, payload: bytes) -> None:
     """Stage-and-replace one restored artifact, never writing in place (#82).
 
     The cleanup is the same one `_write_recorded` performs, for the same stated
@@ -1498,18 +1525,111 @@ def _atomic_write(root: Path, target: Path, text: str) -> None:
     guard_contained_path(root, staging)
     guard_contained_path(root, target)
     try:
-        staging.write_text(text, encoding="utf-8")
+        staging.write_bytes(payload)
         os.replace(staging, target)
     except Exception:
         staging.unlink(missing_ok=True)
         raise
 
 
+def snapshot_local_archives(repo_root: Path | str) -> dict[str, bytes]:
+    """Pre-command bytes of every active archive, by history-relative POSIX path.
+
+    The archive half of the baseline (#126). #124 snapshotted only the non-archive
+    artifacts, because the quarantine move accounted for the archives it moved —
+    but `import_project` materializes *every* vault archive, so a vault-unique
+    archive absent locally beforehand was created by the transaction and had
+    nothing recording that it should not survive a failure. The EPIC is explicit:
+    *"removes every newly created target"*, and *"local history has the same file
+    set and bytes after any failure"*.
+
+    Absence is "not in the mapping" rather than a `None` value: every key here is
+    a file that existed, so a caller cannot misread an unreadable one as absent.
+    """
+    from . import writer
+
+    root = Path(repo_root)
+    sessions_dir = root / writer.AGENT_HISTORY_DIRNAME / SESSIONS_DIRNAME
+    guard_contained_path(root, sessions_dir)
+    snapshot: dict[str, bytes] = {}
+    if not sessions_dir.is_dir():
+        return snapshot
+    for path in sorted(sessions_dir.glob("*.md")):
+        guard_contained_path(root, path)
+        try:
+            snapshot[f"{SESSIONS_DIRNAME}/{path.name}"] = path.read_bytes()
+        except OSError as exc:
+            # Same refusal as the artifact baseline, for the same reason: this
+            # runs before the first move, so refusing costs nothing and
+            # proceeding would arm a rollback that cannot restore this archive.
+            raise VaultError(
+                f"cannot read the pre-command state of {SESSIONS_DIRNAME}/"
+                f"{path.name}: {exc}. Recovery refuses rather than proceed "
+                "without a baseline it could restore from; nothing was moved."
+            ) from exc
+    return snapshot
+
+
+def restore_local_archives(
+    repo_root: Path | str,
+    baseline: dict[str, bytes],
+    ledger: dict[str, bytes] | None,
+    skip: set[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Return the active archive set to its pre-command bytes and presence.
+
+    Covers what `restore_quarantined` structurally cannot: it moves back the
+    copies *it* quarantined, so an archive this transaction newly materialized
+    is not in `moved` and survived the rollback (#126). Those paths are passed as
+    ``skip`` — the quarantine move owns them, and handling one path twice would
+    have the two mechanisms fight over it.
+
+    #93's rule is unchanged and applies to removal exactly as it does to
+    replacement: only a ledger-proven, still-matching materialization may be
+    removed. An occupant we cannot prove we wrote is an external file, is left
+    untouched, and is reported.
+    """
+    from . import writer
+
+    root = Path(repo_root)
+    history_dir = root / writer.AGENT_HISTORY_DIRNAME
+    sessions_dir = history_dir / SESSIONS_DIRNAME
+    guard_contained_path(root, history_dir)
+    guard_contained_path(root, sessions_dir)
+    skipped = set(skip or ())
+    present: set[str] = set()
+    if sessions_dir.is_dir():
+        for path in sorted(sessions_dir.glob("*.md")):
+            guard_contained_path(root, path)
+            present.add(f"{SESSIONS_DIRNAME}/{path.name}")
+    collisions: list[str] = []
+    failed: list[str] = []
+    for relative_path in sorted((set(baseline) | present) - skipped):
+        target = history_dir / relative_path
+        guard_contained_path(root, target)
+        original = baseline.get(relative_path)
+        if _reads_as(root, target, original):
+            continue
+        if relative_path in present and not _is_own_materialization(
+            root, target, relative_path, ledger
+        ):
+            collisions.append(relative_path)
+            continue
+        try:
+            if original is None:
+                target.unlink()
+            else:
+                _atomic_write(root, target, original)
+        except OSError:
+            failed.append(relative_path)
+    return collisions, failed
+
+
 def restore_quarantined(
     repo_root: Path | str,
     quarantine: Path,
     moved: list[str],
-    ledger: dict[str, str] | None = None,
+    ledger: dict[str, bytes] | None = None,
 ) -> RestoreOutcome:
     """Move quarantined archives back, and report everything that could not return.
 
@@ -1572,7 +1692,7 @@ def restore_quarantined(
 
 
 def _is_own_materialization(
-    root: Path, target: Path, relative_path: str, ledger: dict[str, str] | None
+    root: Path, target: Path, relative_path: str, ledger: dict[str, bytes] | None
 ) -> bool:
     """True when *target* is this invocation's own write, unchanged since.
 
@@ -1588,8 +1708,8 @@ def _is_own_materialization(
         return False
     guard_contained_path(root, target)
     try:
-        return target.read_text(encoding="utf-8") == ledger[relative_path]
-    except (OSError, UnicodeDecodeError):
+        return target.read_bytes() == ledger[relative_path]
+    except OSError:
         # Unreadable is "cannot prove it is ours", which is the safe answer.
         return False
 
@@ -1858,7 +1978,7 @@ def import_project(
     vault_root: Path | str,
     project_id: str,
     admitted: set[str] | None = None,
-    ledger: dict[str, str] | None = None,
+    ledger: dict[str, bytes] | None = None,
 ) -> str:
     """Import the vault into the local history; return the resulting state digest."""
     root = Path(repo_root)
@@ -1934,7 +2054,7 @@ def import_project(
     _materialize_local(root, materialized, derived, decisions, ledger)
 
     digest = state_digest(vault_state)
-    write_sync_state(root, project_id, digest)
+    write_sync_state(root, project_id, digest, ledger)
     return digest
 
 
@@ -1943,7 +2063,7 @@ def _materialize_local(
     archives: dict[str, str],
     derived: dict[str, str],
     decisions: str,
-    ledger: dict[str, str] | None = None,
+    ledger: dict[str, bytes] | None = None,
 ) -> None:
     """Replace local history with *archives* and *derived*, staged and reversible.
 
@@ -1998,7 +2118,12 @@ def _read_text(root: Path, path: Path) -> str:
         return ""
 
 
-def write_sync_state(repo_root: Path, project_id: str, digest: str) -> None:
+def write_sync_state(
+    repo_root: Path,
+    project_id: str,
+    digest: str,
+    ledger: dict[str, bytes] | None = None,
+) -> None:
     """Record the baseline as the final local write of a successful operation.
 
     Public because the Git transport (issue #80) must *defer* it until the exact
@@ -2006,11 +2131,26 @@ def write_sync_state(repo_root: Path, project_id: str, digest: str) -> None:
     commit that has not been pushed is not a vault change that succeeded, and
     advancing the digest there records a baseline the other device can never
     observe.
+
+    Staged-and-replaced, and recorded in the ledger *before* the replace (#126).
+    Both halves are required by AC3. It was the one local write outside the
+    transaction: a plain in-place `write_text` could mutate and then raise, and
+    with nothing recorded the rollback could not prove the changed file was its
+    own — so the operator's original baseline was reported as an external
+    collision instead of being restored. Recording the intended bytes first is
+    what `_materialize_local` already does, for the same reason; replacing
+    atomically is what makes the record decisive, since the file then holds
+    either the old bytes or exactly the recorded ones, never a partial write no
+    ledger entry could match.
     """
+    root = Path(repo_root)
     path = sync_state_path(repo_root)
-    guard_contained_path(Path(repo_root), path)
+    guard_contained_path(root, path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_sync_state(project_id, digest), encoding="utf-8", newline="\n")
+    payload = render_sync_state(project_id, digest).encode("utf-8")
+    if ledger is not None:
+        ledger[SYNC_STATE_FILENAME] = payload
+    _atomic_write(root, path, payload)
 
 
 # --------------------------------------------------------------------------- #
