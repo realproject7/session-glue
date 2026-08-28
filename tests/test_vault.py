@@ -925,15 +925,28 @@ _FS_VERBS = frozenset({
     "read_text", "write_text", "read_bytes", "write_bytes",
     "iterdir", "glob", "rglob", "walk",
     "mkdir", "rmdir", "unlink", "rename", "replace", "touch", "symlink_to",
-    "open", "hardlink_to", "chmod", "copy", "copytree", "move",
+    "open", "hardlink_to", "chmod", "copy", "copy2", "copytree", "move",
 })
 
 #: Calls that establish containment for the path handed to them. Each takes the
 #: path it proves as one of its arguments, which is what lets the sweep match a
 #: guard to a *target* rather than merely to a function body.
+#:
+#: `writer.reject_symlink` is **not** here, and its absence is the point.
+#: It tests one path for being a symlink and says nothing about the path's
+#: ancestors -- which is exactly the leaf-only shape #88 exists to remove: a
+#: symlinked `sessions/` leaves `target.is_symlink()` false while the access
+#: still lands outside the tree. Accepting it as proof would let the sweep
+#: certify the defect it was built to catch. `vault.py` calls it only through
+#: `guard_contained_path`, which walks root → every ancestor → leaf, so nothing
+#: in the module depends on it counting.
+#:
+#: `assert_within` *is* here on its own merit: it compares `path.resolve()`
+#: against the resolved root, and resolution follows symlinks, so a redirected
+#: ancestor lands outside the root and is refused.
 _GUARD_CALLS = frozenset({
     "guard_contained_path", "_prepare_target", "_write_recorded",
-    "_read_text", "reject_symlink", "assert_within",
+    "_read_text", "assert_within",
 })
 
 #: Filesystem calls that are unguarded *by design*, keyed by the exact operation
@@ -985,6 +998,12 @@ _MODULE_RECEIVERS = frozenset({"os", "os.path", "shutil", "pathlib"})
 #: destination is the one that decides where bytes come to rest, so a guard on
 #: the source alone proves nothing about where the write went.
 _TWO_PATH_VERBS = frozenset({"replace", "rename", "copy", "copy2", "copytree", "move"})
+
+# A verb missing from `_FS_VERBS` is never scanned at all, whatever this set
+# says about how to read its operands. `copy2` sat here and not there, so the
+# operand model knew how to read a call the sweep never asked about. Asserted
+# rather than left for the next reader to notice.
+assert not _TWO_PATH_VERBS - _FS_VERBS, sorted(_TWO_PATH_VERBS - _FS_VERBS)
 
 #: Link creation, which this module may not do at all. Containment alone is the
 #: wrong test for it: guarding the receiver is *correct* and *complete* -- the
@@ -1266,6 +1285,26 @@ def _swap(root, staged, target):
 def _swap(root, staged, target):
     guard_contained_path(root, staged)
     shutil.move(staged, target)
+""",
+    # `copy2` was in `_TWO_PATH_VERBS` but not `_FS_VERBS`, so it was never
+    # scanned at all -- the operand model knew how to read it and the sweep
+    # never asked.
+    "a copy2 with neither end guarded": """
+def _clone(src, dst):
+    shutil.copy2(src, dst)
+""",
+    "a copy2 whose destination is unguarded": """
+def _clone(root, src, dst):
+    guard_contained_path(root, src)
+    shutil.copy2(src, dst)
+""",
+    # A leaf-only check is not containment. Accepting `reject_symlink` as proof
+    # would let the sweep certify the exact shape #88 exists to remove: this
+    # passes while a symlinked *ancestor* still redirects the read.
+    "a leaf-only reject_symlink standing in for containment": """
+def _leaf_only(path):
+    writer.reject_symlink(path)
+    return path.read_text()
 """,
     # An exemption is a claim about specific calls, not a licence for the verb.
     # These use the real allowlisted qualnames, so they are the exemption's own
