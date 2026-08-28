@@ -269,6 +269,7 @@ def sync(
     project_id: str,
     operation,
     message: str,
+    finalize: list | None = None,
 ) -> str:
     """Run one vault-mutating operation against a Git clone, end to end.
 
@@ -276,6 +277,13 @@ def sync(
     (which performs its own validation, privacy gate and content→state→marker
     publication), then exactly one commit, then the push — and only then the
     local baseline.
+
+    ``finalize`` runs only once the push has succeeded, and deliberately outside
+    the rollback: it is for work that must not exist if the vault write did not
+    land — resolve's local materialization (#89), whose early application would
+    leave the losing local bytes in neither place after a failed push. A failure
+    there is not a reason to undo a push that already succeeded, and the local
+    write rolls itself back, so the unadvanced digest is the only trace.
 
     ``before`` is the commit the clone sits on once it is current with its
     upstream, and *both* the core work and the commit/push run under the same
@@ -314,6 +322,8 @@ def sync(
                 f"{before} — reset it yourself before syncing again"
             ) from exc
         raise
+    for step in finalize or ():
+        step()
     vault.write_sync_state(Path(repo_root), project_id, digest)
     return digest
 
@@ -330,14 +340,17 @@ def push(repo_root: Path | str, clone: Path | str, project_id: str, **kwargs) ->
 
 def resolve(repo_root: Path | str, clone: Path | str, project_id: str, head_session: str,
             **kwargs) -> str:
+    deferred: list = []
+
     def operation(clone_path: Path, created: "vault.Creations") -> str:
         return vault.resolve_project(
             repo_root, clone_path, project_id, head_session, write_local_state=False,
-            created=created, **kwargs
+            created=created, defer_local=deferred, **kwargs
         )
 
     return sync(
-        repo_root, clone, project_id, operation, f"session-glue: resolve {project_id}"
+        repo_root, clone, project_id, operation,
+        f"session-glue: resolve {project_id}", finalize=deferred,
     )
 
 

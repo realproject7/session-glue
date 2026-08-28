@@ -800,3 +800,79 @@ def test_git_pull_refuses_lifecycle_divergence(tmp_path, checkout, clone, bare_r
 
     assert index.read_bytes() == before
     assert f"--lifecycle {SESSION}=local|vault" in capsys.readouterr().err
+
+
+def test_a_failed_push_during_resolve_does_not_destroy_the_local_side(
+    tmp_path, checkout, clone, bare_remote, capsys
+):
+    """#89's own mirror image: resolve's local write must not outlive a failed push.
+
+    Resolve retains the losing local bytes as a vault candidate, and a failed
+    push rolls those candidates back. If the local materialization has already
+    replaced the local archive by then, the operator's version exists in neither
+    place — the exact data loss this ticket is about, reintroduced from the other
+    direction.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    _diverge_in_the_vault(clone)
+
+    local = next((checkout / ".agent-history" / "sessions").glob("*.md"))
+    mine = local.read_text(encoding="utf-8").replace("Did the thing.", "My local edit.")
+    local.write_text(mine, encoding="utf-8")
+    baseline = vault.sync_state_path(checkout).read_bytes()
+
+    hooks = bare_remote / "hooks"
+    hooks.mkdir(exist_ok=True)
+    hook = hooks / "pre-receive"
+    hook.write_text("#!/bin/sh\necho 'refused by policy' >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    capsys.readouterr()
+    assert _run(
+        "sync", "resolve", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone), "--head-session", SESSION,
+        "--archive", f"{SESSION}=vault",
+    ) == cli.EXIT_ERROR
+
+    # Nothing reached the vault, so the local bytes are the only copy left —
+    # and they must still be here.
+    assert local.read_text(encoding="utf-8") == mine
+    assert vault.sync_state_path(checkout).read_bytes() == baseline
+    assert _git(clone, "status", "--porcelain", "--untracked-files=no").stdout == ""
+
+
+def test_resolving_to_vault_over_git_lands_locally_after_the_push(checkout, clone, capsys):
+    """The success half of the deferral: it must still actually run."""
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    _diverge_in_the_vault(clone)
+    local = next((checkout / ".agent-history" / "sessions").glob("*.md"))
+    local.write_text(
+        local.read_text(encoding="utf-8").replace("Did the thing.", "My local edit."),
+        encoding="utf-8",
+    )
+
+    assert _run(
+        "sync", "pull", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == cli.EXIT_CONFLICT
+
+    assert _run(
+        "sync", "resolve", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone), "--head-session", SESSION,
+        "--archive", f"{SESSION}=vault",
+    ) == 0
+
+    landed = local.read_text(encoding="utf-8")
+    assert "Diverged in the vault." in landed and "My local edit." not in landed
+    assert _run("validate", "--repo-root", str(checkout), "--sessions") == 0
+    # The conflict is settled: the pull that refused is now a clean no-op.
+    assert _run(
+        "sync", "pull", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0

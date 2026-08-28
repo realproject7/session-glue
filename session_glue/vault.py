@@ -1219,8 +1219,7 @@ _RESOLVE_SELECTOR = {"archive": "--archive", "lifecycle": "--lifecycle"}
 def _pull_divergence(
     local_archives: dict[str, str],
     incoming: dict[str, str],
-    local_lifecycle: list[dict[str, Any]],
-    vault_lifecycle: list[dict[str, Any]],
+    disagreeing_lifecycle: list[str],
 ) -> tuple[dict[str, set[str]], list[str]]:
     """What pull must refuse, as ``({session_id: kinds}, unresolvable paths)``.
 
@@ -1252,8 +1251,7 @@ def _pull_divergence(
             )
         else:
             kinds.setdefault(local_id, set()).add("archive")
-    _, disagreeing = merge_lifecycle(local_lifecycle, vault_lifecycle)
-    for session_id in disagreeing:
+    for session_id in disagreeing_lifecycle:
         kinds.setdefault(session_id, set()).add("lifecycle")
     return kinds, unresolvable
 
@@ -1278,15 +1276,17 @@ def import_project(repo_root: Path | str, vault_root: Path | str, project_id: st
         path: materialize_document(text, root) for path, text in vault_archives.items()
     }
     local_archives = read_local_archives(root)
-    local_lifecycle = read_state_local(root).get("lifecycle", [])
-    vault_lifecycle = vault_state.get("lifecycle", [])
+    # Merged rather than the vault's list alone: `merge_lifecycle` adopts a
+    # one-sided entry, so taking the vault's list would drop a local-only entry
+    # silently. Its disagreements are the lifecycle half of the divergence check.
+    merged_lifecycle, disagreeing = merge_lifecycle(
+        read_state_local(root).get("lifecycle", []), vault_state.get("lifecycle", [])
+    )
 
     # Before the union, not after: `union.update(materialized)` is the exact line
     # that used to overwrite a divergent local archive with the vault's copy, so
     # the comparison has to happen while both sides are still separate (#89).
-    diverging, unresolvable = _pull_divergence(
-        local_archives, materialized, local_lifecycle, vault_lifecycle
-    )
+    diverging, unresolvable = _pull_divergence(local_archives, materialized, disagreeing)
     if unresolvable:
         raise VaultError(
             "pull cannot reconcile these paths and refuses rather than overwrite "
@@ -1311,10 +1311,6 @@ def import_project(repo_root: Path | str, vault_root: Path | str, project_id: st
     union.update(materialized)
 
     head = vault_state.get("head_session_id") or ""
-    # Merged rather than the vault's list alone: `merge_lifecycle` adopts a
-    # one-sided entry and every disagreement has already been refused above, so
-    # taking the vault's list here would drop a local-only entry silently.
-    merged_lifecycle, _ = merge_lifecycle(local_lifecycle, vault_lifecycle)
     derived = rebuild_derived(union, head, merged_lifecycle)
 
     decisions = merge_decisions(
@@ -1472,6 +1468,7 @@ def resolve_project(
     acknowledgements: list[dict[str, Any]] | None = None,
     write_local_state: bool = True,
     created: "Creations | None" = None,
+    defer_local: list | None = None,
 ) -> str:
     """Resolve every named conflict with explicit selectors and publish the result.
 
@@ -1480,6 +1477,12 @@ def resolve_project(
     write, so a resolution cannot become the path by which blocked content
     reaches the vault. Non-chosen candidates are retained under ``conflicts/``,
     never dropped, and never enter the active archive union or the index rebuild.
+
+    ``defer_local`` receives the local materialization instead of it running
+    here. A transport whose vault write is not final until a later step — Git,
+    where the push can still fail and roll the candidates back — must not have
+    replaced local history by then: the losing local bytes would exist in
+    neither place. Folder mode passes nothing and applies it immediately.
     """
     root = Path(repo_root)
     require_project_id(root, project_id)
@@ -1573,16 +1576,24 @@ def resolve_project(
 
     # The selection is only half-made until it exists locally: without this, a
     # `--archive ID=vault` choice leaves the local copy untouched and pull's #89
-    # guard refuses the very version the operator just chose. Local before
-    # `VAULT-SYNC.yaml`, so a failure here leaves the digest unadvanced and the
+    # guard refuses the very version the operator just chose. Always before
+    # `VAULT-SYNC.yaml`, so a failure leaves the digest unadvanced and the
     # operation genuinely un-run rather than half-recorded.
-    local_active = {path: materialize_document(text, root) for path, text in active.items()}
-    _materialize_local(
-        root,
-        local_active,
-        rebuild_derived(local_active, head_session, merged_lifecycle),
-        decisions,
-    )
+    def apply_local() -> None:
+        local_active = {
+            path: materialize_document(text, root) for path, text in active.items()
+        }
+        _materialize_local(
+            root,
+            local_active,
+            rebuild_derived(local_active, head_session, merged_lifecycle),
+            decisions,
+        )
+
+    if defer_local is None:
+        apply_local()
+    else:
+        defer_local.append(apply_local)
 
     digest = state_digest(new_state)
     if write_local_state:
