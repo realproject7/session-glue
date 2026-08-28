@@ -822,7 +822,8 @@ def test_a_failed_push_during_resolve_does_not_destroy_the_local_side(
     local = next((checkout / ".agent-history" / "sessions").glob("*.md"))
     mine = local.read_text(encoding="utf-8").replace("Did the thing.", "My local edit.")
     local.write_text(mine, encoding="utf-8")
-    baseline = vault.sync_state_path(checkout).read_bytes()
+    history = checkout / ".agent-history"
+    before = {p: p.read_bytes() for p in history.rglob("*") if p.is_file()}
 
     hooks = bare_remote / "hooks"
     hooks.mkdir(exist_ok=True)
@@ -838,9 +839,12 @@ def test_a_failed_push_during_resolve_does_not_destroy_the_local_side(
     ) == cli.EXIT_ERROR
 
     # Nothing reached the vault, so the local bytes are the only copy left —
-    # and they must still be here.
+    # and the whole local file set must be exactly as it was, `VAULT-SYNC.yaml`
+    # included. Asserted as a full snapshot rather than one archive: the
+    # materialization rewrites derived views too, so a partial application would
+    # pass a single-file check.
     assert local.read_text(encoding="utf-8") == mine
-    assert vault.sync_state_path(checkout).read_bytes() == baseline
+    assert {p: p.read_bytes() for p in history.rglob("*") if p.is_file()} == before
     assert _git(clone, "status", "--porcelain", "--untracked-files=no").stdout == ""
 
 
