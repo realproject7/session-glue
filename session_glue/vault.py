@@ -1560,22 +1560,39 @@ def resolve_project(
         )
 
     candidates, records = build_conflict_candidates(archive_conflicts, lifecycle_conflicts)
-    gate_artifacts(
-        {**active, **candidates},
-        vault_state.get("acknowledgements", []) + list(acknowledgements or []),
-    )
 
-    content = dict(active)
-    content.update(candidates)
+    # #82 found the gate running over archives and candidates while `DECISIONS.md`
+    # was appended to the published content *afterwards*, so a matched secret in a
+    # merged decision reached the vault unacknowledged (#91).
+    #
+    # The final published mapping is therefore assembled in full first, and the
+    # gated set is derived *from* it by removing the two artifacts #91 exempts.
+    # Nothing is added afterwards: `_publish` receives this exact mapping. A new
+    # artifact added here is gated automatically, because reaching the gate is
+    # the default and exemption is what has to be spelled out.
+    manifest_path = f"{CONFLICTS_DIRNAME}/{MANIFEST_FILENAME}"
+    decisions_vault = _read_text(Path(namespace), Path(namespace) / DECISIONS_FILENAME)
+    decisions = merge_decisions(_read_text(root, _local_decisions_path(root)), decisions_vault)
     merged_records = merge_manifest_records(read_manifest(namespace), records)
+
+    content = {**active, **candidates}
     if merged_records:
-        content[f"{CONFLICTS_DIRNAME}/{MANIFEST_FILENAME}"] = render_manifest(merged_records)
-    decisions = merge_decisions(
-        _read_text(root, _local_decisions_path(root)),
-        _read_text(Path(namespace), Path(namespace) / DECISIONS_FILENAME),
-    )
+        content[manifest_path] = render_manifest(merged_records)
     if decisions:
         content[DECISIONS_FILENAME] = decisions
+
+    # Exempt: the conflict manifest, which #91 states is tooling-written rather
+    # than user content; and a decision carried forward byte-identical from the
+    # vault, whose acknowledgement was given when it was introduced. Re-gating
+    # unchanged bytes would demand an acknowledgement for content this operation
+    # did not bring, which is the rule push already applies to a changed decision.
+    exempt = {manifest_path}
+    if decisions and decisions == decisions_vault:
+        exempt.add(DECISIONS_FILENAME)
+    gate_artifacts(
+        {path: text for path, text in content.items() if path not in exempt},
+        vault_state.get("acknowledgements", []) + list(acknowledgements or []),
+    )
 
     new_state = {
         "head_session_id": head_session,

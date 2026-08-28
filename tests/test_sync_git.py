@@ -880,3 +880,57 @@ def test_resolving_to_vault_over_git_lands_locally_after_the_push(checkout, clon
         "sync", "pull", "--repo-root", str(checkout), "--project-id", "alpha",
         "--vault-git-dir", str(clone),
     ) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Issue #91 — a decision-only finding blocks a Git resolve before any commit
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_over_git_blocked_by_decisions_creates_no_commit(
+    checkout, clone, bare_remote, capsys
+):
+    """AC2 + AC4 over Git: the archives are clean, only the decision is not.
+
+    The Git half matters on its own because the block has to land before
+    `stage_commit_push`, not merely before the folder write — a commit that
+    reaches the remote cannot be taken back by a rollback.
+    """
+    assert _run(
+        "sync", "push", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone),
+    ) == 0
+    _diverge_in_the_vault(clone)
+
+    secret = "ghp_" + "f" * 20
+    (checkout / ".agent-history" / "DECISIONS.md").write_text(
+        f"# Decisions\n\n- 2026-08-28 {SESSION} 1 use token {secret}\n", encoding="utf-8"
+    )
+    before_head = _git(clone, "rev-parse", "HEAD").stdout.strip()
+    remote_before = subprocess.run(
+        ["git", "-C", str(bare_remote), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    baseline = vault.sync_state_path(checkout).read_bytes()
+    capsys.readouterr()
+
+    assert _run(
+        "sync", "resolve", "--repo-root", str(checkout), "--project-id", "alpha",
+        "--vault-git-dir", str(clone), "--head-session", SESSION,
+        "--archive", f"{SESSION}=local",
+    ) == cli.EXIT_ERROR
+
+    err = capsys.readouterr().err
+    assert "DECISIONS.md" in err
+    assert secret not in err                      # AC5: no match text
+    assert str(bare_remote) not in err            # AC5: no remote URL
+
+    # AC4: nothing created — no commit here, nothing pushed, clone clean.
+    assert _git(clone, "rev-parse", "HEAD").stdout.strip() == before_head
+    assert _git(clone, "status", "--porcelain").stdout.strip() == ""
+    assert subprocess.run(
+        ["git", "-C", str(bare_remote), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip() == remote_before
+    assert vault.sync_state_path(checkout).read_bytes() == baseline
+    assert not (clone / "projects" / "alpha" / "conflicts").exists()
