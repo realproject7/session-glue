@@ -1355,9 +1355,10 @@ class RestoreOutcome:
     cover it.
 
     Collapsing any two prints a diagnosis that is not true: folding ``failed``
-    into ``collisions`` reported *"something else occupies the path"* for a path
-    nothing occupied, which is the mistake this split exists to prevent and
-    which I made anyway one field later.
+    into ``collisions`` asserts an occupant that is not ours when there may be
+    no such occupant at all. That is the mistake this split exists to prevent,
+    and it recurred once inside the split's own introduction — which is why each
+    cause is defined by what happened, never by what is at the path.
 
     None is a silent skip — every one is reported, and any of them means the
     result is not an exact restoration.
