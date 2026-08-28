@@ -2515,3 +2515,53 @@ def test_a_dangling_escape_is_still_refused(tmp_path):
 
     with pytest.raises(vault.VaultError, match="outside repo_root"):
         vault.export_project(repo, vault_root, "alpha")
+
+
+# --------------------------------------------------------------------------- #
+# Issue #110 — admission is the transport's vouch, and folder mode has none
+# --------------------------------------------------------------------------- #
+
+
+def test_admitted_archives_without_a_vouch_returns_the_listing_unchanged():
+    """Folder mode's contract: no provenance source, so no narrowing."""
+    listing = {"sessions/a.md": "A", "sessions/b.md": "B"}
+
+    assert vault.admitted_archives(listing, None) == listing
+
+
+def test_admitted_archives_keeps_only_the_vouched_paths():
+    listing = {"sessions/a.md": "A", "sessions/stray.md": "S"}
+
+    assert vault.admitted_archives(listing, {"sessions/a.md"}) == {"sessions/a.md": "A"}
+
+
+def test_an_empty_vouch_admits_nothing_rather_than_everything():
+    """`set()` is not `None`: a transport that vouches for nothing means it.
+
+    Worth pinning because the two are easy to conflate, and conflating them
+    would restore the bypass on any clone whose namespace is untracked.
+    """
+    assert vault.admitted_archives({"sessions/a.md": "A"}, set()) == {}
+
+
+def test_folder_export_still_reads_a_namespace_local_archive(tmp_path, checkout):
+    """The folder transport's behaviour is unchanged by #110.
+
+    It passes no admission set — there is no index to consult — so a file in the
+    namespace is read exactly as before. The exposure this ticket closes is
+    publication into Git history and a push to a remote; a folder vault has
+    neither, and a stray file in a synced folder is already carried by the sync
+    client rather than by this tool.
+    """
+    vault_root = tmp_path / "vault"
+    vault.export_project(checkout, vault_root, "alpha")
+    stray = vault.project_dir(vault_root, "alpha") / vault.SESSIONS_DIRNAME / "stray.md"
+    stray.write_text("stray bytes\n", encoding="utf-8")
+
+    _write_history(checkout, session_id="2026-08-29-0900-second")
+    vault.export_project(checkout, vault_root, "alpha")
+
+    assert stray.read_text(encoding="utf-8") == "stray bytes\n"
+    assert "sessions/stray.md" in vault.read_vault_archives(
+        vault.project_dir(vault_root, "alpha")
+    )
