@@ -898,7 +898,7 @@ def read_state_local(repo_root: Path | str) -> dict[str, Any]:
     return {"lifecycle": lifecycle}
 
 
-def namespace_is_empty(namespace: Path) -> bool:
+def _namespace_is_empty(namespace: Path) -> bool:
     """True when ``projects/<id>/`` is absent or holds nothing."""
     path = Path(namespace)
     if not path.exists():
@@ -918,7 +918,7 @@ def _namespace_is_bootstrap(namespace: Path, sync_state: dict[str, Any] | None) 
     residue is irreducible, and v1 answers it with user-serialized operation
     rather than a lock.
     """
-    if not namespace_is_empty(namespace):
+    if not _namespace_is_empty(namespace):
         return False
     if sync_state and sync_state.get("last_remote_state_sha256"):
         raise VaultUnavailable(
@@ -1112,7 +1112,7 @@ def import_project(repo_root: Path | str, vault_root: Path | str, project_id: st
     root = Path(repo_root)
     require_project_id(root, project_id)
     namespace = project_dir(Path(vault_root), project_id)
-    if namespace_is_empty(namespace):
+    if _namespace_is_empty(namespace):
         raise VaultUnavailable(
             f"vault not fully available: {namespace} is absent or empty"
         )
