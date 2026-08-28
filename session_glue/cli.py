@@ -17,7 +17,18 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import __version__, gitcheck, installer, leakscan, reader, skills, validator, vault, writer
+from . import (
+    __version__,
+    gitcheck,
+    installer,
+    leakscan,
+    reader,
+    skills,
+    validator,
+    vault,
+    vaultgit,
+    writer,
+)
 from .schema import (
     Handoff,
     HandoffParseError,
@@ -385,6 +396,16 @@ def _add_vault_transport(parser: argparse.ArgumentParser) -> None:
             "never creates it or any intermediate parent."
         ),
     )
+    transport.add_argument(
+        "--vault-git-dir",
+        metavar="PATH",
+        help=(
+            "Existing local clone of a private Git vault repository, with a "
+            "checked-out branch and a configured upstream. Uses your existing "
+            "git authentication; never invokes gh, creates a repository, or "
+            "handles a token."
+        ),
+    )
 
 
 def _add_common_sync_args(parser: argparse.ArgumentParser) -> None:
@@ -497,6 +518,22 @@ def _parse_acknowledgements(values: list[str]) -> list[dict[str, str]]:
     return acknowledgements
 
 
+def _uses_git_transport(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "vault_git_dir", None))
+
+
+def _resolved_vault_git_dir(args: argparse.Namespace) -> Path:
+    """Validate the Git transport target before anything is read or written."""
+    clone = Path(args.vault_git_dir)
+    if not clone.is_dir():
+        raise vault.VaultError(
+            f"--vault-git-dir {clone} does not exist or is not a directory; clone "
+            "your private vault repository yourself — this command never clones, "
+            "creates a repository, or invokes gh"
+        )
+    return clone
+
+
 def _resolved_vault_dir(args: argparse.Namespace) -> Path:
     """Validate the folder transport target before anything is read or written.
 
@@ -537,18 +574,25 @@ def _run_sync(operation) -> int:
 
 def _cmd_sync_push(args: argparse.Namespace) -> int:
     def operation() -> str:
-        vault_dir = _resolved_vault_dir(args)
         problems = validator.validate_history(Path(args.repo_root), check_sessions=True)
         if problems:
             raise vault.VaultError(
                 "local history is not valid; refusing to export:\n  "
                 + "\n  ".join(problems)
             )
+        acknowledgements = _parse_acknowledgements(args.acknowledge)
+        if _uses_git_transport(args):
+            return vaultgit.push(
+                args.repo_root,
+                _resolved_vault_git_dir(args),
+                args.project_id,
+                acknowledgements=acknowledgements,
+            )
         return vault.export_project(
             args.repo_root,
-            vault_dir,
+            _resolved_vault_dir(args),
             args.project_id,
-            acknowledgements=_parse_acknowledgements(args.acknowledge),
+            acknowledgements=acknowledgements,
         )
 
     return _run_sync(operation)
@@ -556,6 +600,10 @@ def _cmd_sync_push(args: argparse.Namespace) -> int:
 
 def _cmd_sync_pull(args: argparse.Namespace) -> int:
     def operation() -> str:
+        if _uses_git_transport(args):
+            return vaultgit.pull(
+                args.repo_root, _resolved_vault_git_dir(args), args.project_id
+            )
         return vault.import_project(args.repo_root, _resolved_vault_dir(args), args.project_id)
 
     return _run_sync(operation)
@@ -563,14 +611,25 @@ def _cmd_sync_pull(args: argparse.Namespace) -> int:
 
 def _cmd_sync_resolve(args: argparse.Namespace) -> int:
     def operation() -> str:
+        choices = {
+            "archive_choices": _parse_selectors(args.archive, "--archive"),
+            "lifecycle_choices": _parse_selectors(args.lifecycle, "--lifecycle"),
+            "acknowledgements": _parse_acknowledgements(args.acknowledge),
+        }
+        if _uses_git_transport(args):
+            return vaultgit.resolve(
+                args.repo_root,
+                _resolved_vault_git_dir(args),
+                args.project_id,
+                args.head_session,
+                **choices,
+            )
         return vault.resolve_project(
             args.repo_root,
             _resolved_vault_dir(args),
             args.project_id,
             args.head_session,
-            archive_choices=_parse_selectors(args.archive, "--archive"),
-            lifecycle_choices=_parse_selectors(args.lifecycle, "--lifecycle"),
-            acknowledgements=_parse_acknowledgements(args.acknowledge),
+            **choices,
         )
 
     return _run_sync(operation)
