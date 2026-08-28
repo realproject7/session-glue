@@ -2698,3 +2698,59 @@ def test_a_cleanup_failure_is_actionable_and_stops_nothing(
     assert _history_bytes(checkout) == before, (
         "the cleanup failure skipped the remaining restoration"
     )
+
+
+@pytest.mark.parametrize("transport", ["folder", "git"])
+def test_a_cleanup_inspection_failure_claims_no_emptiness(
+    tmp_path, checkout, clone, monkeypatch, capsys, transport
+):
+    """#127 AC1/AC2: the cleanup can fail *before* emptiness is established.
+
+    `is_dir()` and the enumeration raise on a parent whose permissions changed,
+    exactly as `rmdir()` does — so they belong inside the same handler. But an
+    enumeration that failed has established nothing, and the removal-failure
+    wording ("it is empty, so this does not affect what was restored") would then
+    be a guess printed as a fact. It is wrong in the one case that matters: a
+    directory still holding an archive that never went back, reported as
+    harmless (@re1, PR #130).
+    """
+    flag, target = _vault_with_a_unique_archive(tmp_path, transport, clone)
+    _duplicate_archive(checkout, "000-earlier")
+    before = _history_bytes(checkout)
+    real_write = vault.write_sync_state
+
+    def mutate_then_raise(*args, **kwargs):
+        real_write(*args, **kwargs)
+        raise vault.VaultError("injected primary failure")
+
+    real_iterdir = pathlib.Path.iterdir
+
+    def iterdir_fails_on_the_quarantine(self, *a, **k):
+        if self.name.startswith("quarantine-"):
+            raise OSError(13, "Permission denied")
+        return real_iterdir(self, *a, **k)
+
+    monkeypatch.setattr(vault, "write_sync_state", mutate_then_raise)
+    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir_fails_on_the_quarantine)
+    capsys.readouterr()
+
+    rc = _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", flag, str(target), "--apply",
+    )
+    err = capsys.readouterr().err
+
+    assert rc == cli.EXIT_ERROR, "the inspection failure escaped as a traceback"
+    assert "injected primary failure" in err, "the original failure was replaced"
+    assert "could not be inspected" in err, "the cleanup failure was not reported"
+    assert "whether anything remains inside it is unknown" in err
+    assert "it is empty" not in err, "emptiness was claimed without being established"
+    assert "does not affect what was restored" not in err, (
+        "an unverified directory was reported as harmless"
+    )
+    assert "could not restore" not in err, (
+        "cleanup was folded into the restore-failure categories"
+    )
+    assert _history_bytes(checkout) == before, (
+        "the inspection failure skipped the remaining restoration"
+    )

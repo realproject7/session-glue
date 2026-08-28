@@ -1369,19 +1369,29 @@ class RestoreOutcome:
     means the result is not an exact restoration.
 
     ``cleanup_failed`` is deliberately **not** a fourth cause of that kind, and
-    the scoping above is deliberate too (#127). It records that the emptied
-    quarantine directory could not be removed — a tidying step that runs after
-    every archive is already back. A retained empty directory cannot un-restore
+    the scoping above is deliberate too (#127). It records that the quarantine
+    directory could not be cleaned up — a tidying step that runs after every
+    archive is already back. A retained *empty* directory cannot un-restore
     anything, so folding it into the three would print "this is not an exact
     restoration" about a restoration that was exact. That is the same collapse
     the three-way split exists to prevent, one level out: a cause defined by
     what happened, not by what is left on disk.
+
+    ``cleanup_verified_empty`` says whether the directory was **observed** empty
+    before the removal was attempted, and exists because the reassuring half of
+    that wording has to be earned. The cleanup can fail at the enumeration as
+    well as at the removal, and an enumeration that failed established nothing:
+    reporting "it is empty, so this does not affect what was restored" about a
+    directory nobody could read would be a guess printed as a fact — and wrong
+    in the one case that matters, where what remains inside is an archive that
+    never went back.
     """
 
     collisions: list[str]
     unrestorable: list[str]
     failed: list[str]
     cleanup_failed: str | None = None
+    cleanup_verified_empty: bool = False
 
     def __bool__(self) -> bool:
         # Restoration outcomes only. Truthiness answers "is anything not back?",
@@ -1418,11 +1428,20 @@ def _recovery_outcome_detail(outcome: "RestoreOutcome", quarantine: Path) -> str
         # Appended rather than folded in, and worded so it cannot be read as a
         # restoration problem: it follows an exact-restoration line without
         # contradicting it (#127).
-        detail += (
-            f"; the emptied quarantine directory could not be removed and remains "
-            f"at {quarantine} ({outcome.cleanup_failed}) — it is empty, so this "
-            "does not affect what was restored"
-        )
+        if outcome.cleanup_verified_empty:
+            detail += (
+                f"; the emptied quarantine directory could not be removed and "
+                f"remains at {quarantine} ({outcome.cleanup_failed}) — it is "
+                "empty, so this does not affect what was restored"
+            )
+        else:
+            # Occupancy-neutral: emptiness was never established, so this says
+            # what happened and what is unknown, and claims nothing else.
+            detail += (
+                f"; the quarantine directory at {quarantine} could not be "
+                f"inspected ({outcome.cleanup_failed}), so whether anything "
+                "remains inside it is unknown; check it before removing it"
+            )
     return detail
 
 
@@ -1705,8 +1724,13 @@ def restore_quarantined(
             # history empty with no report at all (#124).
             failed.append(relative_path)
     cleanup_failed: str | None = None
+    cleanup_verified_empty = False
     try:
         if quarantine.is_dir() and not any(quarantine.iterdir()):
+            # Emptiness is established *here* and nowhere else. A failure before
+            # this line — `is_dir` or the enumeration itself — leaves occupancy
+            # unknown, and the report may not claim otherwise (@re1, PR #130).
+            cleanup_verified_empty = True
             quarantine.rmdir()
     except OSError as exc:
         # Cleanup, not restoration (#127). Escaping here replaced the caller's
@@ -1720,6 +1744,7 @@ def restore_quarantined(
         unrestorable=unrestorable,
         failed=failed,
         cleanup_failed=cleanup_failed,
+        cleanup_verified_empty=cleanup_verified_empty,
     )
 
 
