@@ -4,6 +4,27 @@ Research feeding a future decision on whether Session Glue should add first-clas
 `glue skill` install support for agents beyond Codex and Claude. This document is
 research only; it implements nothing.
 
+## Personal Vault and resume boundary
+
+Orthogonal to the installer question below, but binding on every surface listed here: a
+skill installed on **any** agent carries the same Personal Vault rules, so a future
+installer target inherits them rather than negotiating its own.
+
+- The default is **local**. An agent runs a vault command only when the operator supplies
+  all three of the command, the vault path, and the project ID. None of them is inferred.
+- No automatic external contact: an agent never creates a vault folder, repository, or
+  remote, never authenticates or handles a credential, and never retries, polls, or
+  synchronizes on its own initiative.
+- Unavailability, conflicts, and privacy blocks are reported to the operator and stop
+  there. The agent does not resolve a conflict or acknowledge a privacy finding.
+- A pull produces ordinary local files, so resume is unchanged: read
+  `.agent-history/LATEST.md` first. There is no separate vault resume path.
+
+Canonical text lives in the bundled skill's `references/protocol.md` (byte-identical
+across the Codex and Claude bundles) and in the README's Personal Vault section. This
+document adds no behavior of its own; it records the constraint so a surface evaluation
+does not have to rediscover it.
+
 ## Requirement
 
 Session Glue installs into **dedicated per-repo or per-user skill/rules folders**
