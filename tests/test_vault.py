@@ -3168,7 +3168,52 @@ def test_a_failed_rollback_write_leaves_no_staging_residue(checkout, monkeypatch
 
     monkeypatch.setattr(vault.os, "replace", failing)
 
-    collisions = vault.restore_local_artifacts(checkout, snapshot, ledger)
+    collisions, failed = vault.restore_local_artifacts(checkout, snapshot, ledger)
 
-    assert collisions == ["INDEX.yaml"], "the rollback failure was not reported"
+    # Its own cause, not folded into collisions: nothing occupies the path, so
+    # reporting it as one would print a diagnosis that is not true.
+    assert failed == ["INDEX.yaml"], "the rollback failure was not reported"
+    assert collisions == []
     assert not list(history.glob("*.partial")), "a half-written sibling was left behind"
+
+
+def test_a_failed_archive_restore_is_reported_not_escaped(checkout, monkeypatch):
+    """RE2's round-2 finding: the mirror of the same defect, one function up.
+
+    `restore_local_artifacts` was guarded in round 2 and `restore_quarantined`
+    was not, so its `os.replace` escaped — replacing the caller's actionable
+    error with a traceback and abandoning every archive after it in the loop,
+    which left active history empty with no report at all. Worse than the
+    original gap-1 symptom, which at least restored the archives.
+    """
+    quarantine, moved = _quarantined(checkout)
+    real = os.replace
+
+    def failing(source, target):
+        if str(target).endswith("000-earlier.md"):
+            raise OSError("injected failure inside the archive restore")
+        return real(source, target)
+
+    monkeypatch.setattr(vault.os, "replace", failing)
+
+    outcome = vault.restore_quarantined(checkout, quarantine, moved)
+
+    assert outcome.failed == ["sessions/000-earlier.md"]
+    assert outcome.collisions == [] and outcome.unrestorable == []
+    # The loop continued: the other archive still came back.
+    assert "sessions/2026-08-28-1200-alpha.md" in vault.read_local_archives(checkout)
+    assert (quarantine / "000-earlier.md").is_file(), "the quarantined copy was lost"
+
+
+def test_the_three_causes_are_reported_with_distinct_wording(checkout):
+    """Each cause gets its own diagnosis — the reason `RestoreOutcome` is split."""
+    quarantine = checkout / writer.AGENT_HISTORY_DIRNAME / "quarantine-x"
+
+    detail = vault._recovery_outcome_detail(
+        vault.RestoreOutcome(collisions=["a.md"], unrestorable=["b.md"], failed=["c.md"]),
+        quarantine,
+    )
+
+    assert "something else occupies the path" in detail
+    assert "no longer available" in detail
+    assert "the write itself failed" in detail

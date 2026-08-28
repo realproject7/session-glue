@@ -1346,9 +1346,10 @@ class RestoreOutcome:
 
     collisions: list[str]
     unrestorable: list[str]
+    failed: list[str]
 
     def __bool__(self) -> bool:
-        return bool(self.collisions or self.unrestorable)
+        return bool(self.collisions or self.unrestorable or self.failed)
 
 
 def _recovery_outcome_detail(outcome: "RestoreOutcome", quarantine: Path) -> str:
@@ -1368,6 +1369,14 @@ def _recovery_outcome_detail(outcome: "RestoreOutcome", quarantine: Path) -> str
         parts.append(
             "could not restore (the quarantined copy is no longer available, so "
             "this is not an exact restoration): " + ", ".join(outcome.unrestorable)
+        )
+    if outcome.failed:
+        # Its own cause and its own wording. Folding a write failure into
+        # `collisions` would print "something else occupies the path" for a path
+        # nothing occupies — the same collapse `RestoreOutcome` exists to avoid.
+        parts.append(
+            "could not restore (the write itself failed, so this is not an exact "
+            "restoration): " + ", ".join(outcome.failed)
         )
     return "; " + "; ".join(parts)
 
@@ -1404,8 +1413,8 @@ def restore_local_artifacts(
     repo_root: Path | str,
     snapshot: dict[str, str | None],
     ledger: dict[str, str] | None,
-) -> list[str]:
-    """Put the non-archive artifacts back, and report what could not go back.
+) -> tuple[list[str], list[str]]:
+    """Put the non-archive artifacts back; report collisions and write failures.
 
     Same provenance rule as the archive side: only an artifact this invocation
     wrote, and that still matches what it wrote, may be replaced. Anything else
@@ -1417,6 +1426,7 @@ def restore_local_artifacts(
     history_dir = root / writer.AGENT_HISTORY_DIRNAME
     guard_contained_path(root, history_dir)
     collisions: list[str] = []
+    failed: list[str] = []
     for name, original in sorted(snapshot.items()):
         target = history_dir / name
         guard_contained_path(root, target)
@@ -1437,8 +1447,8 @@ def restore_local_artifacts(
             # AC2 requires every one of them reported. Letting it escape here
             # would replace the caller's actionable error with a traceback and
             # abandon the artifacts after it in the loop (#124).
-            collisions.append(name)
-    return collisions
+            failed.append(name)
+    return collisions, failed
 
 
 def _reads_as(root: Path, target: Path, expected: str | None) -> bool:
@@ -1514,6 +1524,7 @@ def restore_quarantined(
     guard_contained_path(root, quarantine)
     collisions: list[str] = []
     unrestorable: list[str] = []
+    failed: list[str] = []
     for relative_path in sorted(moved):
         source = quarantine / Path(relative_path).name
         target = sessions_dir / Path(relative_path).name
@@ -1525,10 +1536,19 @@ def restore_quarantined(
         if target.exists() and not _is_own_materialization(root, target, relative_path, ledger):
             collisions.append(relative_path)
             continue
-        os.replace(source, target)
+        try:
+            os.replace(source, target)
+        except OSError:
+            # The mirror of `restore_local_artifacts`' own guard. Letting this
+            # escape replaced the caller's actionable error with a traceback and
+            # abandoned every archive after it in the loop — leaving active
+            # history empty with no report at all (#124).
+            failed.append(relative_path)
     if quarantine.is_dir() and not any(quarantine.iterdir()):
         quarantine.rmdir()
-    return RestoreOutcome(collisions=collisions, unrestorable=unrestorable)
+    return RestoreOutcome(
+        collisions=collisions, unrestorable=unrestorable, failed=failed
+    )
 
 
 def _is_own_materialization(

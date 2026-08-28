@@ -802,9 +802,11 @@ def _cmd_sync_recover_duplicates(args: argparse.Namespace) -> int:
             # a vault that goes away between the check and the read, a sync-state
             # write that fails after materialization already landed.
             outcome = vault.restore_quarantined(root, quarantine, moved, ledger)
-            outcome.collisions.extend(
-                vault.restore_local_artifacts(root, snapshot, ledger)
+            artifact_collisions, artifact_failures = vault.restore_local_artifacts(
+                root, snapshot, ledger
             )
+            outcome.collisions.extend(artifact_collisions)
+            outcome.failed.extend(artifact_failures)
             detail = vault._recovery_outcome_detail(outcome, quarantine)
             # An actionable error, not a raw traceback: the operator has to know
             # what state their history is in, and #124 requires every collision
