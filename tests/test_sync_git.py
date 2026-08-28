@@ -7,6 +7,7 @@ proven by the harness rather than asserted in prose.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -2432,3 +2433,195 @@ def test_an_unrestorable_source_is_named_in_the_cli_error(
     assert "no longer available" in err
     assert "not an exact restoration" in err
     assert "sessions/000-earlier.md" in err
+
+
+# --------------------------------------------------------------------------- #
+# #126 — the recovery transaction restores complete pre-command bytes/presence
+# --------------------------------------------------------------------------- #
+
+
+def _history_bytes(root: Path) -> dict[str, bytes]:
+    """Every file under `.agent-history`, by POSIX-relative path, as raw bytes.
+
+    Bytes and not text: `_history_state` reads with universal newlines, so a
+    rollback that rewrote CRLF as LF compared equal there. That normalisation is
+    exactly what #126 AC4 forbids, so the control for it cannot use text I/O.
+    """
+    history = root / ".agent-history"
+    return {
+        p.relative_to(history).as_posix(): p.read_bytes()
+        for p in sorted(history.rglob("*"))
+        if p.is_file()
+    }
+
+
+def _vault_with_a_unique_archive(tmp_path, transport, clone):
+    """A vault holding one archive that the checkout does not have.
+
+    Built from a *separate* history rather than by deleting the archive from the
+    checkout: removing a local archive leaves the derived views referencing it,
+    so the fixture would fail validation for a reason unrelated to what it tests.
+    """
+    other = tmp_path / "other-device"
+    _write_history(other, session_id="2026-08-27-0900-bravo")
+    if transport == "git":
+        assert _run(
+            "sync", "push", "--repo-root", str(other), "--project-id", "alpha",
+            "--vault-git-dir", str(clone),
+        ) == 0
+        return "--vault-git-dir", clone
+    vault_root = tmp_path / "vault"
+    vault.export_project(other, vault_root, "alpha")
+    return "--vault-dir", vault_root
+
+
+@pytest.mark.parametrize("transport", ["folder", "git"])
+def test_a_newly_materialized_archive_does_not_survive_a_failed_recovery(
+    tmp_path, checkout, clone, monkeypatch, transport
+):
+    """AC2: `import_project` materializes *every* vault archive, not only ours.
+
+    #124's rollback moved back the copies the quarantine had moved. A vault
+    archive absent locally beforehand was never in `moved`, so it stayed behind
+    after a failed recovery — local history gaining a file the operator never
+    had, which is precisely what the EPIC's *"same file set and bytes after any
+    failure"* forbids.
+    """
+    flag, target = _vault_with_a_unique_archive(tmp_path, transport, clone)
+    _duplicate_archive(checkout, "000-earlier")
+    before = _history_bytes(checkout)
+    assert not any("bravo" in name for name in before), "fixture: bravo must be vault-only"
+
+    monkeypatch.setattr(
+        vault, "write_sync_state",
+        lambda *a, **k: (_ for _ in ()).throw(vault.VaultError("injected fault")),
+    )
+    assert _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", flag, str(target), "--apply",
+    ) != 0
+
+    after = _history_bytes(checkout)
+    assert not any("bravo" in name for name in after), (
+        "the transaction's own materialization outlived its failure"
+    )
+    assert after == before
+    assert validator.validate_history(checkout, check_sessions=True) == []
+
+
+@pytest.mark.parametrize("transport", ["folder", "git"])
+def test_a_sync_state_write_that_mutates_then_raises_is_rolled_back(
+    tmp_path, checkout, clone, monkeypatch, transport
+):
+    """AC3: the one local write that was outside the transaction.
+
+    The failure mode is specific: the write *succeeds*, then the operation
+    raises. Pre-#126 the changed file was unrecorded, so the rollback could not
+    prove it was its own and reported the operator's own baseline as an external
+    collision — leaving the advanced digest in place, which makes the next sync
+    a no-op over history that was never imported.
+    """
+    flag, target = _vault_with_a_unique_archive(tmp_path, transport, clone)
+    _duplicate_archive(checkout, "000-earlier")
+    real_write = vault.write_sync_state
+
+    def mutate_then_raise(*args, **kwargs):
+        real_write(*args, **kwargs)
+        raise vault.VaultError("injected fault after the sync state was written")
+
+    monkeypatch.setattr(vault, "write_sync_state", mutate_then_raise)
+    before = _history_bytes(checkout)
+
+    assert _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", flag, str(target), "--apply",
+    ) != 0
+
+    after = _history_bytes(checkout)
+    assert after.get("VAULT-SYNC.yaml") == before.get("VAULT-SYNC.yaml"), (
+        "the sync state kept the digest of an import that was rolled back"
+    )
+    assert after == before
+
+
+@pytest.mark.parametrize("transport", ["folder", "git"])
+def test_rollback_restores_crlf_and_non_utf8_artifact_bytes_exactly(
+    tmp_path, checkout, clone, monkeypatch, transport
+):
+    """AC4: the baseline is bytes, so the rollback can put bytes back.
+
+    Two originals no text snapshot could reconstruct. CRLF survived `read_text`
+    as `\\n` and came back LF-only — a rollback quietly rewriting every line
+    ending it claimed to preserve. Non-UTF-8 raised `UnicodeDecodeError`, which
+    #124 mapped to `None`, and `None` means *absent before* — so restoring
+    presence **deleted** an artifact the operator had.
+    """
+    flag, target = _vault_with_a_unique_archive(tmp_path, transport, clone)
+    history = checkout / ".agent-history"
+    crlf = (history / "LATEST.md").read_bytes().replace(b"\n", b"\r\n")
+    (history / "LATEST.md").write_bytes(crlf)
+    raw = (history / "RESUME_PROMPT.txt").read_bytes() + b"\xff\xfe not utf-8\n"
+    (history / "RESUME_PROMPT.txt").write_bytes(raw)
+    _duplicate_archive(checkout, "000-earlier")
+    # Re-applied: `create_handoff` rebuilds the derived views, so the bytes under
+    # test have to be the ones in place when the command runs, not before it.
+    (history / "LATEST.md").write_bytes(crlf)
+    (history / "RESUME_PROMPT.txt").write_bytes(raw)
+    before = _history_bytes(checkout)
+
+    monkeypatch.setattr(
+        vault, "write_sync_state",
+        lambda *a, **k: (_ for _ in ()).throw(vault.VaultError("injected fault")),
+    )
+    assert _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", flag, str(target), "--apply",
+    ) != 0
+
+    assert (history / "LATEST.md").read_bytes() == crlf, "CRLF was normalised by the rollback"
+    assert (history / "RESUME_PROMPT.txt").read_bytes() == raw, (
+        "an unreadable-as-text artifact was treated as absent and deleted"
+    )
+    assert _history_bytes(checkout) == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission semantics")
+@pytest.mark.parametrize("transport", ["folder", "git"])
+def test_an_unreadable_artifact_refuses_before_any_move(
+    tmp_path, checkout, clone, capsys, transport
+):
+    """AC4's other branch: refuse *before any mutation*, with an actionable error.
+
+    A baseline that cannot be read cannot be restored from, so the transaction
+    has nothing to promise. The refusal runs while the history is still whole.
+
+    Asserted on whether anything *moved*, not on the end state: pre-#126 the
+    command quarantined both copies, hit the unreadable artifact during the
+    import, and unwound — leaving the history equal to where it started and the
+    emptied quarantine cleaned up. An end-state check passes there for a reason
+    that has nothing to do with the contract, so it is the announced move, and
+    the refusal that replaces it, that this pins.
+    """
+    flag, target = _vault_with_a_unique_archive(tmp_path, transport, clone)
+    _duplicate_archive(checkout, "000-earlier")
+    unreadable = checkout / ".agent-history" / "LATEST.md"
+    before = _history_bytes(checkout)
+    capsys.readouterr()
+    unreadable.chmod(0o000)
+    try:
+        rc = _run(
+            "sync", "recover-duplicates", "--repo-root", str(checkout),
+            "--project-id", "alpha", flag, str(target), "--apply",
+        )
+    finally:
+        unreadable.chmod(0o600)
+    output = capsys.readouterr()
+
+    assert rc != 0
+    assert "quarantined" not in output.out, (
+        "an unreadable baseline still armed the quarantine before refusing"
+    )
+    assert "cannot read the pre-command state of LATEST.md" in output.err
+    assert "nothing was moved" in output.err
+    assert list((checkout / ".agent-history").glob("quarantine-*")) == []
+    assert _history_bytes(checkout) == before
