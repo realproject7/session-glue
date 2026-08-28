@@ -2833,3 +2833,53 @@ def test_folder_mode_recovery_restores_a_working_state(tmp_path, checkout):
     assert sorted(
         p.name for p in (checkout / ".agent-history" / "quarantine-20260828T120000Z").glob("*.md")
     ) == ["000-earlier.md", "2026-08-28-1200-alpha.md"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #120 — the rollback never overwrites, and never deletes
+# --------------------------------------------------------------------------- #
+
+
+def test_restore_quarantined_puts_the_archives_back(checkout):
+    _local_duplicate_archive(checkout, "000-earlier")
+    plan = vault.plan_duplicate_recovery(checkout)
+    quarantine, moved = vault.quarantine_duplicates(checkout, plan, "20260828T120000Z")
+    assert vault.read_local_archives(checkout) == {}
+
+    stranded = vault.restore_quarantined(checkout, quarantine, moved)
+
+    assert stranded == []
+    assert sorted(vault.read_local_archives(checkout)) == [
+        "sessions/000-earlier.md", "sessions/2026-08-28-1200-alpha.md",
+    ]
+    assert not quarantine.exists(), "an emptied quarantine should not linger"
+
+
+def test_the_rollback_refuses_to_overwrite_a_reappeared_path(checkout):
+    """#93's rule applied to the way back.
+
+    A rollback that clobbers is still destruction, and this command's whole
+    promise is that nothing is destroyed. The occupant wins, the quarantined
+    copy stays put, and the caller is told which paths could not return.
+    """
+    _local_duplicate_archive(checkout, "000-earlier")
+    plan = vault.plan_duplicate_recovery(checkout)
+    quarantine, moved = vault.quarantine_duplicates(checkout, plan, "20260828T120000Z")
+    reappeared = checkout / ".agent-history" / vault.SESSIONS_DIRNAME / "000-earlier.md"
+    reappeared.write_text("something else arrived here\n", encoding="utf-8")
+
+    stranded = vault.restore_quarantined(checkout, quarantine, moved)
+
+    assert stranded == ["sessions/000-earlier.md"]
+    assert reappeared.read_text(encoding="utf-8") == "something else arrived here\n"
+    assert (quarantine / "000-earlier.md").is_file(), "the quarantined copy was destroyed"
+    assert quarantine.is_dir(), "a partially-restored quarantine must stay visible"
+
+
+def test_require_available_namespace_refuses_an_absent_vault(tmp_path, checkout):
+    """AC1's folder half: the same deterministic check, hoisted ahead of any move."""
+    with pytest.raises(vault.VaultUnavailable):
+        vault.require_available_namespace(tmp_path / "gone", "alpha")
+
+    vault.export_project(checkout, tmp_path / "vault", "alpha")
+    assert vault.require_available_namespace(tmp_path / "vault", "alpha") is None

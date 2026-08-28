@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from session_glue import cli, schema, vault, vaultgit, writer
+from session_glue import cli, schema, validator, vault, vaultgit, writer
 from session_glue.vault import SESSIONS_DIRNAME
 
 from test_vault import BODY, _frontmatter, _write_history
@@ -2184,3 +2184,153 @@ def test_recovery_reports_nothing_to_do_on_a_clean_checkout(tmp_path, checkout, 
 
     assert "nothing to recover" in capsys.readouterr().out
     assert not list((dest / ".agent-history").glob("quarantine-*"))
+
+
+# --------------------------------------------------------------------------- #
+# Issue #120 — duplicate recovery is failure-atomic
+# --------------------------------------------------------------------------- #
+
+
+def _duplicate_archive(root: Path, name: str) -> None:
+    frontmatter = _frontmatter(str(root), None)
+    handoff = schema.Handoff.from_frontmatter(frontmatter, BODY)
+    writer.create_handoff(
+        repo_root=root, frontmatter=frontmatter, body=BODY, handoff=handoff,
+        archive_name=name,
+    )
+
+
+def _history_state(root: Path) -> dict:
+    """Everything a failed recovery must leave untouched."""
+    history = root / ".agent-history"
+    return {
+        "sessions": {
+            p.name: p.read_text(encoding="utf-8")
+            for p in (history / SESSIONS_DIRNAME).glob("*.md")
+        },
+        "quarantines": sorted(d.name for d in history.glob("quarantine-*")),
+        "index": (history / "INDEX.yaml").read_text(encoding="utf-8"),
+        "latest": (history / "LATEST.md").read_text(encoding="utf-8"),
+        "resume": (history / "RESUME_PROMPT.txt").read_text(encoding="utf-8"),
+    }
+
+
+def test_a_project_id_mismatch_fails_before_any_move(checkout, clone):
+    """AC1: the promise printed in this command's own --project-id help.
+
+    Before #120 the mismatch was reported *after* the quarantine, so the
+    documented "fails before any write" was false on exactly this path.
+    """
+    _baseline(checkout, clone)
+    _duplicate_archive(checkout, "000-earlier")
+    before = _history_state(checkout)
+
+    assert _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "beta", "--vault-git-dir", str(clone), "--apply",
+    ) == cli.EXIT_ERROR
+
+    assert _history_state(checkout) == before
+    assert validator.validate_history(checkout, check_sessions=True) == []
+
+
+@pytest.mark.parametrize("transport", ["git", "folder"])
+def test_an_unavailable_vault_fails_before_any_move(tmp_path, checkout, clone, transport):
+    """AC1: the transport is preflighted while local history is still whole."""
+    if transport == "folder":
+        vault.export_project(checkout, tmp_path / "vault", "alpha")
+        flag, target = "--vault-dir", tmp_path / "gone"
+    else:
+        _baseline(checkout, clone)
+        flag, target = "--vault-git-dir", tmp_path / "not-a-clone"
+    target.mkdir()
+    _duplicate_archive(checkout, "000-earlier")
+    before = _history_state(checkout)
+
+    assert _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", flag, str(target), "--apply",
+    ) != 0
+
+    assert _history_state(checkout) == before
+    assert validator.validate_history(checkout, check_sessions=True) == []
+
+
+def test_a_failure_after_preflight_restores_the_pre_command_state(
+    checkout, clone, bare_remote
+):
+    """AC2: the rollback itself, not the pre-validation.
+
+    Preflight passes — the clone is a valid working tree — and the *fetch* then
+    fails. This is the case pre-validation can never cover, and the one the
+    shipped command left half-applied.
+    """
+    _baseline(checkout, clone)
+    _duplicate_archive(checkout, "000-earlier")
+    before = _history_state(checkout)
+    shutil.rmtree(bare_remote)
+
+    assert _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", "--vault-git-dir", str(clone), "--apply",
+    ) != 0
+
+    after = _history_state(checkout)
+    assert after["sessions"] == before["sessions"], "active archives were not restored"
+    assert after["index"] == before["index"]
+    assert after["latest"] == before["latest"]
+    assert after["resume"] == before["resume"]
+    assert after["quarantines"] == [], "an empty quarantine was left behind"
+    assert validator.validate_history(checkout, check_sessions=True) == []
+
+
+def test_a_failed_recovery_can_be_retried(checkout, clone, bare_remote, tmp_path):
+    """AC5: the retry has duplicates to find again, and completes.
+
+    Before #120 the retry reported `rc=0, "nothing to recover"` over an emptied
+    checkout — a zero-exit reassurance, which is less visible than the failure
+    that caused it.
+    """
+    _baseline(checkout, clone)
+    _duplicate_archive(checkout, "000-earlier")
+    broken = tmp_path / "not-a-clone"
+    broken.mkdir()
+    assert _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", "--vault-git-dir", str(broken), "--apply",
+    ) != 0
+
+    assert _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", "--vault-git-dir", str(clone), "--apply",
+    ) == 0
+
+    history = checkout / ".agent-history"
+    assert sorted(p.name for p in (history / SESSIONS_DIRNAME).glob("*.md")) == [
+        "2026-08-28-1200-alpha.md"
+    ]
+    assert len(list(history.glob("quarantine-*"))) == 1
+
+
+def test_a_folder_failure_after_preflight_also_rolls_back(tmp_path, checkout, monkeypatch):
+    """AC2 on the folder transport, with the failure injected past preflight.
+
+    A folder vault has no fetch to break, so the failure is injected at the
+    materialization call — which is the point of the rollback: it covers what
+    pre-validation cannot predict, whatever the transport.
+    """
+    vault_root = tmp_path / "vault"
+    vault.export_project(checkout, vault_root, "alpha")
+    _duplicate_archive(checkout, "000-earlier")
+    before = _history_state(checkout)
+    monkeypatch.setattr(
+        vault, "import_project",
+        lambda *a, **k: (_ for _ in ()).throw(vault.VaultError("injected materialization fault")),
+    )
+
+    assert _run(
+        "sync", "recover-duplicates", "--repo-root", str(checkout),
+        "--project-id", "alpha", "--vault-dir", str(vault_root), "--apply",
+    ) == cli.EXIT_ERROR
+
+    assert _history_state(checkout) == before

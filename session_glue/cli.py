@@ -768,11 +768,40 @@ def _cmd_sync_recover_duplicates(args: argparse.Namespace) -> int:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     def operation() -> str:
+        # Everything deterministic first, before a single archive moves. The
+        # project-id promise is printed in this command's own --project-id help
+        # ("a different ID fails before any write"), and it was the move that
+        # broke it: validation used to happen inside pull/import, after the
+        # quarantine (#120).
+        vault.require_project_id(root, args.project_id)
+        if _uses_git_transport(args):
+            clone_path = _resolved_vault_git_dir(args)
+            vaultgit.preflight(clone_path)
+        else:
+            clone_path = None
+            vault.require_available_namespace(_resolved_vault_dir(args), args.project_id)
+
         quarantine, moved = vault.quarantine_duplicates(root, duplicates, stamp)
         print(f"quarantined {len(moved)} archive(s) under {quarantine}")
-        if _uses_git_transport(args):
-            return vaultgit.pull(root, _resolved_vault_git_dir(args), args.project_id)
-        return vault.import_project(root, _resolved_vault_dir(args), args.project_id)
+        try:
+            if clone_path is not None:
+                return vaultgit.pull(root, clone_path, args.project_id)
+            return vault.import_project(root, _resolved_vault_dir(args), args.project_id)
+        except BaseException:
+            # Non-deterministic failures remain — a fetch that dies mid-flight,
+            # a vault that goes away between the check and the read. Put the
+            # archives back so the retry has duplicates to find again.
+            stranded = vault.restore_quarantined(root, quarantine, moved)
+            if stranded:
+                print(
+                    "could not restore (a file reappeared at the same path; "
+                    f"the quarantined copy is kept under {quarantine}): "
+                    + ", ".join(stranded),
+                    file=sys.stderr,
+                )
+            else:
+                print("no changes were kept; active archives were restored", file=sys.stderr)
+            raise
 
     return _run_sync(operation)
 

@@ -1203,6 +1203,24 @@ def require_referenced_archives(
     return archives
 
 
+def require_available_namespace(vault_root: Path | str, project_id: str) -> None:
+    """Deterministic folder-vault preflight, runnable before any local write.
+
+    `import_project` already makes these checks, but it makes them *after*
+    `recover-duplicates` has quarantined — which is the #120 defect. Hoisting
+    them here lets the command refuse an absent, empty or marker-less vault
+    while local history is still untouched, mirroring what
+    :func:`vaultgit.preflight` does for the Git transport.
+    """
+    namespace = project_dir(Path(vault_root), project_id)
+    if _namespace_is_empty(namespace):
+        raise VaultUnavailable(
+            f"vault not fully available: {namespace} is absent or empty"
+        )
+    _require_populated_namespace(namespace, project_id)
+
+
+
 def _publish(
     vault_root: Path,
     namespace: Path,
@@ -1301,6 +1319,49 @@ def free_quarantine_dir(repo_root: Path | str, stamp: str) -> Path:
         if not candidate.exists():
             return candidate
         attempt += 1
+
+
+def restore_quarantined(
+    repo_root: Path | str, quarantine: Path, moved: list[str]
+) -> list[str]:
+    """Move quarantined archives back, and report anything that could not return.
+
+    The rollback half of #120. A recovery that quarantines and then fails at
+    materialization used to leave active history empty with the derived views
+    naming files that had moved — and the retry reported "nothing to recover",
+    because there were no duplicates left to find.
+
+    **Never overwrites.** A path that reappeared while the operation ran keeps
+    what is there and the quarantined copy stays put; the caller surfaces it
+    rather than deciding. That is #93's rule applied to the way back: this
+    command's whole promise is that nothing is destroyed, and a rollback that
+    clobbers is still destruction.
+
+    The quarantine directory is removed only when it is left empty, so a
+    partially-restored one remains visible with its remaining contents.
+    """
+    from . import writer
+
+    root = Path(repo_root)
+    sessions_dir = root / writer.AGENT_HISTORY_DIRNAME / SESSIONS_DIRNAME
+    guard_contained_path(root, sessions_dir)
+    guard_contained_path(root, quarantine)
+    stranded: list[str] = []
+    for relative_path in sorted(moved):
+        source = quarantine / Path(relative_path).name
+        target = sessions_dir / Path(relative_path).name
+        guard_contained_path(root, source)
+        guard_contained_path(root, target)
+        if not source.exists():
+            continue
+        if target.exists():
+            stranded.append(relative_path)
+            continue
+        os.replace(source, target)
+    if quarantine.is_dir() and not any(quarantine.iterdir()):
+        quarantine.rmdir()
+    return stranded
+
 
 
 def plan_duplicate_recovery(repo_root: Path | str) -> dict[str, list[str]]:
