@@ -114,8 +114,13 @@ def test_readme_no_longer_claims_the_cli_never_touches_the_network():
     assert "No network, ever" not in README
     assert "No network unless you ask" in README
     assert "makes no network calls on its own" in README
-    # The exception has to be named, not merely hedged around.
-    assert "--vault-git-dir` runs *your* `git`" in README
+    # The exception has to be named, not merely hedged around. Scoped to the row
+    # itself rather than the whole file, so it is the *claim* that is pinned and
+    # not the markdown emphasis around it.
+    row = next(
+        line for line in README.splitlines() if line.startswith("| **No network unless you ask**")
+    )
+    assert "--vault-git-dir" in row
 
 
 def test_readme_and_help_agree_on_every_v1_limit():
@@ -204,14 +209,26 @@ def test_git_error_documentation_promises_no_leakage():
     assert "The remote URL, your environment, and handoff content never appear" in FLAT_SYNC_HELP
 
 
+def _readme_section(heading: str) -> str:
+    """The text under one README heading, up to the next heading of any level."""
+    body = README.split(heading, 1)[1]
+    # Stop at the next markdown heading -- two or more hashes. A single "#" also
+    # begins a shell comment, and the CLI reference block contains one.
+    match = re.search(r"\n#{2,6} ", body)
+    return body if match is None else body[: match.start()]
+
+
 def test_documented_timeouts_match_the_implementation():
-    assert f"{vaultgit.LOCAL_TIMEOUT}s for local git commands" in README
-    assert f"{vaultgit.NETWORK_TIMEOUT}s for fetch and push" in README
+    """Bind the numbers to the code; leave the sentence around them free."""
+    categories = _readme_section("### Git failures tell you the category")
+    assert f"{vaultgit.LOCAL_TIMEOUT}s" in categories
+    assert f"{vaultgit.NETWORK_TIMEOUT}s" in categories
 
 
 def test_documented_exit_codes_match_the_implementation():
-    assert f"exits `{cli.EXIT_CONFLICT}` for a conflict" in README
-    assert f"`{cli.EXIT_UNAVAILABLE}` for a vault that is not fully available" in README
+    reference = _readme_section("## CLI reference")
+    assert f"`{cli.EXIT_CONFLICT}`" in reference, "CLI reference omits the conflict exit code"
+    assert f"`{cli.EXIT_UNAVAILABLE}`" in reference, "CLI reference omits the unavailable exit code"
 
 
 # --------------------------------------------------------------------------- #
