@@ -946,26 +946,62 @@ _UNGUARDED_BY_DESIGN = {
 }
 
 
-def _target_expression(source, call):
-    """The path expression a filesystem call acts on, or None.
+#: Receivers that are modules rather than paths. `os.replace(a, b)` is an
+#: attribute call whose receiver is `os`, so without this the sweep would take
+#: the module name as the path operand -- flagging the call, but for a reason
+#: that has nothing to do with either path it touches.
+_MODULE_RECEIVERS = frozenset({"os", "os.path", "shutil", "pathlib"})
 
-    `p.write_text(...)` acts on `p`; a bare `open(p)` acts on its first
-    argument. Trailing `.parent` hops are stripped because a guard on `p` proves
-    every ancestor of `p` too -- that is exactly `guard_contained_path`'s
-    contract -- so `p.parent.mkdir()` is covered by a guard naming `p`.
+#: Verbs with a *second* path operand. Both ends land in the filesystem and the
+#: destination is the one that decides where bytes come to rest, so a guard on
+#: the source alone proves nothing about where the write went.
+_TWO_PATH_VERBS = frozenset({"replace", "rename", "copy", "copy2", "copytree", "move"})
+
+#: Link creation. The receiver is the node created inside the tree and must be
+#: contained; the argument is what it points *at*, which is outside the tree by
+#: design -- requiring containment there would forbid symlinks rather than
+#: contain them.
+_LINK_VERBS = frozenset({"symlink_to", "hardlink_to"})
+
+
+def _path_operands(source, call):
+    """Every path expression a filesystem call acts on.
+
+    `p.write_text(...)` acts on `p`; a bare `open(p)` acts on its first argument.
+    A two-path verb acts on both ends: `staged.replace(target)` and
+    `os.replace(staged, target)` each have to prove `target`, which is the
+    operand that decides where the bytes land.
+
+    Trailing `.parent` hops are stripped because a guard on `p` proves every
+    ancestor of `p` too -- that is exactly `guard_contained_path`'s contract --
+    so `p.parent.mkdir()` is covered by a guard naming `p`.
     """
     import ast
 
     func = call.func
-    if isinstance(func, ast.Attribute):
-        node = func.value
-    elif call.args:
-        node = call.args[0]
+    verb = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+    receiver_is_path = (
+        isinstance(func, ast.Attribute)
+        and _normalize(ast.get_source_segment(source, func.value)) not in _MODULE_RECEIVERS
+    )
+
+    if receiver_is_path:
+        nodes = [func.value]
+        if verb in _TWO_PATH_VERBS and call.args:
+            nodes.append(call.args[0])
     else:
-        return None
-    while isinstance(node, ast.Attribute) and node.attr == "parent":
-        node = node.value
-    return _normalize(ast.get_source_segment(source, node))
+        # Bare `open(p)`, or module-qualified `os.replace(src, dst)` where the
+        # receiver is a module and the operands are all in the argument list.
+        nodes = list(call.args[: 2 if verb in _TWO_PATH_VERBS else 1])
+    if verb in _LINK_VERBS:
+        nodes = nodes[:1]
+
+    operands = []
+    for node in nodes:
+        while isinstance(node, ast.Attribute) and node.attr == "parent":
+            node = node.value
+        operands.append(_normalize(ast.get_source_segment(source, node)))
+    return operands
 
 
 def _normalize(text):
@@ -1029,7 +1065,10 @@ def unguarded_fs_targets(source):
                     for arg in child.args
                 )
             if called in _FS_VERBS:
-                touches.append((child.lineno, called, _target_expression(source, child)))
+                touches.extend(
+                    (child.lineno, called, operand)
+                    for operand in _path_operands(source, child)
+                )
 
         if not touches:
             continue
@@ -1062,7 +1101,11 @@ def test_every_vault_helper_reaching_the_filesystem_guards_containment():
       tests above catch that.
     * `_FS_VERBS` is a closed list of names. A filesystem call through a verb
       nobody has thought of -- a new stdlib helper, an aliased method -- is
-      invisible until the name is added here.
+      invisible until the name is added here. `os.symlink`/`os.link` are omitted
+      deliberately rather than overlooked: they place the new link at argument
+      *one*, inverting pathlib's order, and guessing that wrong would flag the
+      pointee and clear the link. Nothing in this module uses them; adding one
+      means teaching `_path_operands` the inversion first.
     * It reasons per function body, so a path laundered through an unguarded
       helper that this sweep clears for other reasons is not traced across the
       call boundary.
@@ -1104,6 +1147,30 @@ class Writer:
 def _swap(staged, target):
     os.replace(staged, target)
 """,
+    # A guard on the source proves nothing about where the bytes come to rest.
+    # The pathlib spelling is the dangerous one: the destination is an argument
+    # while the *receiver* is the guarded source, so a receiver-only sweep reads
+    # the call as fully guarded.
+    "a replacement whose destination is unguarded (pathlib form)": """
+def _swap(root, staged, target):
+    guard_contained_path(root, staged)
+    staged.replace(target)
+""",
+    "a replacement whose destination is unguarded (os form)": """
+def _swap(root, staged, target):
+    guard_contained_path(root, staged)
+    os.replace(staged, target)
+""",
+    "a rename whose destination is unguarded": """
+def _swap(root, staged, target):
+    guard_contained_path(root, staged)
+    staged.rename(target)
+""",
+    "a move whose destination is unguarded": """
+def _swap(root, staged, target):
+    guard_contained_path(root, staged)
+    shutil.move(staged, target)
+""",
     "a directory removal": """
 def _prune(directory):
     directory.rmdir()
@@ -1143,6 +1210,20 @@ def _fine(path):
     "an existence probe": """
 def _fine(path):
     return path.exists() and path.is_symlink()
+""",
+    "a replacement with both ends guarded": """
+def _fine(root, staged, target):
+    guard_contained_path(root, staged)
+    guard_contained_path(root, target)
+    staged.replace(target)
+""",
+    # The pointee of a symlink is outside the tree by definition -- that is what
+    # a symlink is. Only the node being created has to be contained, or the
+    # sweep would be forbidding symlinks rather than containing them.
+    "a symlink created at a guarded path": """
+def _fine(root, link, external):
+    guard_contained_path(root, link)
+    link.symlink_to(external)
 """,
 }
 
