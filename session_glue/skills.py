@@ -110,19 +110,27 @@ def _reject_overlapping_destinations() -> None:
     the outer agent's uninstall would refuse on files that are not extras at all,
     and its `--replace` install would refuse likewise.
 
-    This guards none of the symlink cases, and nothing here changes them. Stating
-    that precisely, because getting it wrong is what #103 existed to correct:
+    This guards none of the symlink cases and changes none of them. **No single
+    mechanism owns them** — naming one as *the* mechanism is the defect #103
+    exists to correct, so here is the measured distribution instead:
 
-    - **Containment** — a write escaping the scope root, including through a
-      symlinked *ancestor* — is `_assert_within` (`:67`), called from
-      `apply_install` and `apply_uninstall` before any write.
-    - `_unmanaged_extras` refuses *some* symlink shapes as a side effect of
-      listing entries, since a symlinked directory is `is_symlink()` while a real
-      one is skipped. It is not a containment guard and must not be credited as
-      one: given a symlinked ancestor whose contents are exactly the managed set,
-      it does not refuse at all, and `_assert_within` is what stops the escape
-      (@re1, PR #133; the case is pinned by #92's
-      `test_install_replace_through_a_symlinked_ancestor_deletes_nothing`).
+    ==========================================  ==========================
+    shape                                       refused by
+    ==========================================  ==========================
+    intermediate managed *directory* symlinked,
+    not itself a managed entry                  `_unmanaged_extras`
+    the symlinked path *is* a managed entry     `_reject_managed_symlinks`
+    symlinked *ancestor*, external directory
+    holding exactly the managed set             `_assert_within`, at apply
+    ==========================================  ==========================
+
+    The third is the one that catches a reader out: planning **accepts** it —
+    `_unmanaged_extras` finds nothing unmanaged — and the escape is stopped only
+    once `apply_install` reaches `_assert_within`. #92 pins it in
+    `test_install_replace_through_a_symlinked_ancestor_deletes_nothing`, whose
+    own docstring says the directory is populated *"so `_unmanaged_extras` does
+    not refuse first"*. So extras is not a containment guard and must not be
+    credited as one (@re1 and @re2, PR #133).
 
     What this function guards is a different failure entirely: valid bundle data
     quietly breaking the ownership boundary between agents.
