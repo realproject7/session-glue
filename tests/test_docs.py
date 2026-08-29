@@ -118,9 +118,6 @@ def test_changelog_cuts_0_4_0_below_an_empty_unreleased():
     name stated. A section test whose slice does not stop at the next heading
     stops discriminating the moment a section is inserted.
     """
-    # Before the slices: without it, dropping the heading raises `IndexError`
-    # from the split rather than failing with a message, in a test whose whole
-    # purpose is to fail for the property its name states (@re2, PR #135).
     assert "## [0.4.0] - 2026-08-29" in CHANGELOG, "the changelog was never cut"
 
     unreleased = CHANGELOG.split("## [Unreleased]", 1)[1].split("## [0.4.0]", 1)[0]
