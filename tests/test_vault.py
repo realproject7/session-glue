@@ -967,16 +967,17 @@ _GUARD_CALLS = frozenset({
 #: edit above a call look like a new exemption, and the resulting churn teaches
 #: reviewers to re-stamp the allowlist without reading it.
 #:
-#: All four entries are the same pattern: a path recovered from a list that only
+#: All three entries are the same pattern: a path recovered from a list that only
 #: ever received targets already proven contained. The sweep does not trace
 #: values through containers, so it cannot see that -- a limit, stated here
 #: rather than papered over.
+#:
+#: They are all *deletions*. The two byte-restoring entries that used to sit here
+#: are gone with #102: `Creations.restore` and `LocalWrite.commit` no longer write
+#: in place, so there is nothing left to excuse. The sweep failing on a stale
+#: allowlist entry is what surfaced that -- an exemption outliving its call is
+#: itself a finding.
 _UNGUARDED_BY_DESIGN = {
-    ("Creations.restore", "write_bytes", "target"): (
-        1,
-        "rollback path (#93): restores the bytes of a target `_write_recorded` "
-        "proved contained via `_prepare_target` before it displaced them",
-    ),
     ("Creations.undo", "unlink", "target"): (
         1, "removes only files recorded during a guarded write"
     ),
@@ -987,11 +988,6 @@ _UNGUARDED_BY_DESIGN = {
         1,
         "rollback path: every target in `applied` went through `_prepare_target` "
         "in the try body before it was appended",
-    ),
-    ("LocalWrite.commit", "write_bytes", "target"): (
-        1,
-        "rollback path: restores the bytes of a target `_prepare_target` already "
-        "proved contained on the way in",
     ),
 }
 
@@ -3332,3 +3328,313 @@ def test_a_newline_translated_occupant_is_not_this_transactions_write(checkout):
     assert (sessions / "000-earlier.md").read_bytes() == recorded.replace(b"\n", b"\r\n"), (
         "the external occupant was overwritten"
     )
+
+
+# --------------------------------------------------------------------------- #
+# #102 — the rollback replacement paths are themselves failure-safe
+# --------------------------------------------------------------------------- #
+
+
+def _tear_bytes_for(monkeypatch, stem):
+    """Fail any `write_bytes` to *stem* or a staging sibling of it, part-way.
+
+    Matched on the stem rather than the exact name **on purpose**: an in-place
+    rollback writes `<stem>` and a staged one writes `<stem>.<pid>-<n>.partial`,
+    so a test that named only one would fire on one implementation and sail past
+    the other. This is the assertion that has to bite before *and* after the fix.
+    """
+    real = pathlib.Path.write_bytes
+
+    def torn(self, data):
+        if self.name.startswith(stem):
+            real(self, data[: len(data) // 2])
+            raise OSError("simulated disk-full mid-write")
+        return real(self, data)
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", torn)
+
+
+def test_a_torn_creations_restore_never_leaves_partial_bytes(tmp_path, monkeypatch):
+    """AC1/AC4: the rollback must not be the thing that destroys the file.
+
+    `Creations.restore` wrote the captured bytes back in place. A write that died
+    part-way left the target holding neither the pre-operation bytes nor the
+    publication's -- measured on the pre-fix tree, a torn restore of 42 bytes left
+    21. The rollback existed to save that file and was what corrupted it.
+    """
+    root = tmp_path / "vault"
+    (root / vault.SESSIONS_DIRNAME).mkdir(parents=True)
+    target = root / vault.SESSIONS_DIRNAME / "a.md"
+    original = b"the operator's original bytes, all of them\n"
+    target.write_bytes(original)
+
+    record = vault.Creations()
+    vault._write_recorded(root, target, "publication bytes\n", record)
+    published = target.read_bytes()
+
+    _tear_bytes_for(monkeypatch, "a.md")
+    unrestored = record.restore()
+    monkeypatch.undo()
+
+    assert unrestored == [str(target)], "the failure must be reported, not raised"
+
+    now = target.read_bytes()
+    assert now in (original, published), f"target left in a torn state: {now!r}"
+    assert not list((root / vault.SESSIONS_DIRNAME).glob("*" + vault.STAGING_SUFFIX)), (
+        "a failed rollback left its own staging sibling behind"
+    )
+    # Asserted last, so the corruption check above is what fails on an in-place
+    # rollback rather than this structural one tripping first and hiding it.
+    assert record.replaced == [(root, target, original)], "the root must travel with the entry"
+
+
+def test_a_torn_local_rollback_never_leaves_partial_bytes(tmp_path, monkeypatch):
+    """The mirror in `LocalWrite.commit`, which is the local half of the same defect.
+
+    The fault is aimed at the **rollback** write, not the forward one. `commit`'s
+    forward write is also in place, but #102's scope is the rollback paths, and a
+    tear on the forward write would prove nothing about them -- it fires
+    identically before and after this change. Counting writes to the same stem is
+    what separates them: write 1 is the forward replace, write 2 is the rollback
+    putting the original back, and only the second is torn.
+    """
+    history = tmp_path / writer.AGENT_HISTORY_DIRNAME
+    history.mkdir(parents=True)
+    target = history / "LATEST.md"
+    original = b"the operator's original latest, all of it\n"
+    target.write_bytes(original)
+
+    write = vault.LocalWrite(history)
+    write.stage("LATEST.md", "rebuilt latest\n")
+    write.stage("INDEX.yaml", "rebuilt index\n")
+
+    real = pathlib.Path.write_bytes
+    seen = []
+
+    def torn(self, data):
+        if self.name.startswith("LATEST.md"):
+            seen.append(self.name)
+            if len(seen) > 1:          # the rollback write, whatever it is named
+                real(self, data[: len(data) // 2])
+                raise OSError("simulated disk-full mid-write")
+        return real(self, data)
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", torn)
+    with pytest.raises(vault.VaultError, match="could not restore"):
+        # `fault_after=1` lands the forward write, then forces the rollback.
+        write.commit(fault_after=1)
+    monkeypatch.undo()
+
+    assert len(seen) == 2, f"the rollback write never happened: {seen}"
+    now = target.read_bytes()
+    assert now in (original, b"rebuilt latest\n"), f"target left in a torn state: {now!r}"
+    assert not list(history.glob("*" + vault.STAGING_SUFFIX)), (
+        "a failed rollback left its own staging sibling behind"
+    )
+
+
+def test_the_generated_staging_sibling_has_the_pid_counter_shape(tmp_path):
+    """AC4: the generated form, asserted explicitly rather than implied.
+
+    The shape is the whole reason a future cleanup could ever be safe: it is what
+    distinguishes this tool's debris from a file an operator named `*.partial`.
+    """
+    root = tmp_path / "vault"
+    root.mkdir()
+    target = root / "archive.md"
+    target.write_bytes(b"x\n")
+
+    sibling = vault._free_staging_sibling(root, target)
+
+    assert sibling.parent == target.parent
+    assert sibling.name == f"archive.md.{os.getpid()}-0{vault.STAGING_SUFFIX}"
+    assert sibling.name != target.name + vault.STAGING_SUFFIX, (
+        "the bare suffix is exactly the shape that must never be generated"
+    )
+
+
+def test_an_operator_bare_partial_file_is_never_this_tools_staging_artifact(tmp_path):
+    """AC3/AC4: the unsafe bare-suffix counterexample, stated as a property.
+
+    `<target>.partial` with no pid or counter is a name an operator may choose.
+    Nothing here generates it, nothing consumes it, and it must survive a
+    publication that stages right next to it.
+    """
+    root = tmp_path / "vault"
+    root.mkdir()
+    target = root / "archive.md"
+    target.write_bytes(b"published\n")
+    operators = target.with_name(target.name + vault.STAGING_SUFFIX)
+    operators.write_bytes(b"operator's notes, not ours\n")
+
+    record = vault.Creations()
+    vault._write_recorded(root, target, "new publication bytes\n", record)
+
+    assert operators.read_bytes() == b"operator's notes, not ours\n", (
+        "a publication consumed an operator's bare .partial file"
+    )
+    record.restore()
+    assert operators.read_bytes() == b"operator's notes, not ours\n", (
+        "a rollback consumed an operator's bare .partial file"
+    )
+    assert target.read_bytes() == b"published\n"
+
+
+def test_one_unrestorable_target_does_not_abandon_the_others(tmp_path, monkeypatch):
+    """AC1: a failed entry must not cost the entries after it.
+
+    `restore` raised on the first failure, so one unwritable target left every
+    *later* entry holding the publication's bytes with nothing said about them.
+    Measured on the pre-fix tree with three targets and the middle one failing:
+    one restored, two not. AC1 asks for the full pre-operation set, so the
+    rollback now restores everything it can and names what it could not.
+
+    Three targets and not two, because `restore` walks `reversed(replaced)`: with
+    only two, a failure on the second is indistinguishable from stopping.
+    """
+    root = tmp_path / "vault"
+    (root / vault.SESSIONS_DIRNAME).mkdir(parents=True)
+    names = ["a.md", "b.md", "c.md"]
+    originals = {n: f"ORIGINAL {n}\n".encode() for n in names}
+    record = vault.Creations()
+    for name in names:
+        target = root / vault.SESSIONS_DIRNAME / name
+        target.write_bytes(originals[name])
+        vault._write_recorded(root, target, f"PUBLISHED {name}\n", record)
+
+    real = pathlib.Path.write_bytes
+
+    def fail_only_b(self, data):
+        if self.name.startswith("b.md"):
+            raise OSError("simulated disk-full mid-write")
+        return real(self, data)
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", fail_only_b)
+    # A rollback that raises instead of reporting fails the *state* assertions
+    # below, which is where the abandonment shows — not on an exception class.
+    try:
+        unrestored = record.restore()
+    except OSError:
+        unrestored = ["<raised instead of reporting>"]
+    monkeypatch.undo()
+
+    sessions = root / vault.SESSIONS_DIRNAME
+    assert (sessions / "c.md").read_bytes() == originals["c.md"], "the entry before the failure"
+    assert (sessions / "a.md").read_bytes() == originals["a.md"], (
+        "the entry after the failure was abandoned"
+    )
+    assert (sessions / "b.md").read_bytes() == b"PUBLISHED b.md\n", (
+        "the unwritable target must keep complete bytes, never a torn write"
+    )
+    assert unrestored == [str(sessions / "b.md")], (
+        "the rollback must report exactly what it could not restore"
+    )
+    assert not list(sessions.glob("*" + vault.STAGING_SUFFIX)), "staging residue"
+
+
+def test_a_failed_rollback_never_replaces_the_publication_failure(tmp_path, monkeypatch):
+    """#102: one message, both causes — asserted through `_publish` itself.
+
+    `Creations.restore` runs inside `_publish`'s `except` handler. An exception
+    raised there becomes the error the operator sees, demoting the publication
+    failure that caused the rollback to `__context__` — the operator is told the
+    rollback could not write while never learning what went wrong first. #127
+    settled the pattern for `restore_quarantined`: report outcomes, let the
+    caller compose. Neither cause may hide the other.
+
+    Driven through the real `_publish` handler rather than by re-implementing the
+    composition here: a test that rebuilds the logic it is checking passes
+    whatever production does.
+    """
+    vault_root = tmp_path / "vault"
+    namespace = vault_root / vault.PROJECTS_DIRNAME / "alpha"
+    (namespace / vault.SESSIONS_DIRNAME).mkdir(parents=True)
+    held = namespace / vault.SESSIONS_DIRNAME / "held.md"
+    held.write_bytes(b"ORIGINAL held\n")
+
+    real = pathlib.Path.write_bytes
+
+    def fail_the_rollback(self, data):
+        # Only the rollback's staging write. The forward publication write goes
+        # through `write_text`, so it is untouched and the fault is aimed
+        # squarely at the restore.
+        if self.name.startswith("held.md") and vault.STAGING_SUFFIX in self.name:
+            raise OSError("simulated disk-full mid-write")
+        return real(self, data)
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", fail_the_rollback)
+    with pytest.raises(vault.VaultError) as caught:
+        # `fault_after=1` lands the first write, then fails the publication, so
+        # the handler has something recorded to roll back.
+        vault._publish(
+            vault_root,
+            namespace,
+            {f"{vault.SESSIONS_DIRNAME}/held.md": "PUBLISHED held\n",
+             f"{vault.SESSIONS_DIRNAME}/other.md": "PUBLISHED other\n"},
+            {"head_session_id": "", "lifecycle": [], "acknowledgements": []},
+            "alpha",
+            fault_after=1,
+        )
+    monkeypatch.undo()
+
+    message = str(caught.value)
+    assert "injected publication fault" in message, (
+        "the rollback failure replaced the cause the operator needs"
+    )
+    assert "held.md" in message, "the unrestored target was not named"
+    assert caught.value.__cause__ is not None, "the original must stay chained"
+    assert held.read_bytes() == b"PUBLISHED held\n", (
+        "the unrestorable target must keep complete bytes, never a torn write"
+    )
+    assert not list((namespace / vault.SESSIONS_DIRNAME).glob("*" + vault.STAGING_SUFFIX))
+
+
+def test_a_failed_restore_still_removes_what_the_publication_created(tmp_path, monkeypatch):
+    """AC1's *file set* half, which is separable from its bytes half.
+
+    A publication that replaces one archive and creates another, then fails at
+    the marker, must leave neither behind. `record.undo()` is what deletes the
+    created file — and it runs *after* `record.restore()`, so a restore that
+    raised skipped it and the vault kept a file it never had. The bytes question
+    for the unrestorable target is a different one and stays open; this is only
+    about the file set, which is achievable in every arm.
+    """
+    vault_root = tmp_path / "vault"
+    namespace = vault_root / vault.PROJECTS_DIRNAME / "alpha"
+    (namespace / vault.SESSIONS_DIRNAME).mkdir(parents=True)
+    (namespace / vault.SESSIONS_DIRNAME / "a.md").write_bytes(b"ORIGINAL a\n")
+    created = namespace / vault.SESSIONS_DIRNAME / "b.md"
+    before = sorted(p.name for p in (namespace / vault.SESSIONS_DIRNAME).iterdir())
+
+    real_text, real_bytes = pathlib.Path.write_text, pathlib.Path.write_bytes
+
+    def fail_the_marker(self, data, **kwargs):
+        if self.name.startswith(vault.MARKER_FILENAME):
+            raise OSError(5, "publication failed writing the marker")
+        return real_text(self, data, **kwargs)
+
+    def fail_restoring_a(self, data):
+        if self.name.startswith("a.md") and vault.STAGING_SUFFIX in self.name:
+            raise OSError(28, "No space left on device")
+        return real_bytes(self, data)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", fail_the_marker)
+    monkeypatch.setattr(pathlib.Path, "write_bytes", fail_restoring_a)
+    with pytest.raises(vault.VaultError) as caught:
+        vault._publish(
+            vault_root,
+            namespace,
+            {f"{vault.SESSIONS_DIRNAME}/a.md": "PUBLISHED a\n",
+             f"{vault.SESSIONS_DIRNAME}/b.md": "PUBLISHED b\n"},
+            {"head_session_id": "", "lifecycle": [], "acknowledgements": []},
+            "alpha",
+        )
+    monkeypatch.undo()
+
+    assert not created.exists(), (
+        "the publication's created file survived a failed rollback"
+    )
+    assert sorted(p.name for p in (namespace / vault.SESSIONS_DIRNAME).iterdir()) == before
+    assert "writing the marker" in str(caught.value), "the publication cause was lost"
+    assert "a.md" in str(caught.value), "the unrestored target was not named"
+    assert not list((namespace / vault.SESSIONS_DIRNAME).glob("*" + vault.STAGING_SUFFIX))

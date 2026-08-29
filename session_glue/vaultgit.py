@@ -325,7 +325,7 @@ def sync(
         # (#104). Same reason `skills.py` and `vault.contained_offset` do it.
         artifacts = {
             target.relative_to(clone_path).as_posix()
-            for target in [*created.files, *(t for t, _ in created.replaced)]
+            for target in [*created.files, *(t for _, t, _ in created.replaced)]
         }
         stage_commit_push(clone_path, project_id, branch, upstream, message, artifacts)
     except Exception as exc:

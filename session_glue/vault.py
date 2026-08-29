@@ -679,18 +679,47 @@ class Creations:
     def __init__(self) -> None:
         self.files: list[Path] = []
         self.dirs: list[Path] = []
-        self.replaced: list[tuple[Path, bytes]] = []
+        # The containment root travels with each entry rather than living on
+        # the instance (#102). `_write_recorded` already holds the right root for
+        # the write it is making, and `Creations()` is public and constructed by
+        # the Git transport — so carrying it per-entry keeps the restore able to
+        # stage inside the tree without changing that constructor.
+        self.replaced: list[tuple[Path, Path, bytes]] = []
 
-    def restore(self) -> None:
+    def restore(self) -> list[str]:
         """Put back the bytes this publication displaced (#93).
+
+        Returns the targets it could not restore, rather than raising (#102).
+        This runs *inside* the caller's `except` handler, so an exception thrown
+        here would become the error the operator sees and demote the publication
+        failure that caused the rollback to `__context__`. #127 settled that for
+        `restore_quarantined`: report outcomes, let the caller compose one
+        message carrying the original cause and the rollback's own failures.
 
         Reverse order, so a target replaced twice in one publication returns to
         the bytes it held before the *first* write. Separate from :meth:`undo`
         because a transport that restores tracked bytes by other means must not
         also run this — see the class docstring.
         """
-        for target, original in reversed(self.replaced):
-            Path(target).write_bytes(original)
+        unrestored: list[str] = []
+        for root, target, original in reversed(self.replaced):
+            # Staged and replaced, never written in place (#102). An in-place
+            # `write_bytes` that fails part-way left the target holding neither
+            # the pre-operation bytes nor the publication's — measured, a torn
+            # restore of 42 bytes left 21 — so the rollback destroyed the file it
+            # exists to save. A failure here now leaves the target untouched and
+            # removes the sibling it staged into.
+            try:
+                _atomic_write(Path(root), Path(target), original)
+            except OSError:
+                # Recorded and carried on, never abandoned. Raising here stopped
+                # the loop, so one unwritable target left every *later* entry
+                # holding the publication's bytes with nothing said about them —
+                # measured, one failure of three restored one instead of two.
+                # AC1 asks for the full pre-operation set, so the rollback
+                # restores everything it can and names what it could not.
+                unrestored.append(str(target))
+        return sorted(unrestored)
 
     def undo(self) -> None:
         """Delete created files, then prune the directories they needed.
@@ -759,12 +788,30 @@ class LocalWrite:
                 original = target.read_bytes() if target.is_file() else None
                 applied.append((target, original))
                 target.write_bytes(self._staged[relative_path])
-        except Exception:
+        except Exception as exc:
+            unrestored: list[str] = []
             for target, original in reversed(applied):
-                if original is None:
-                    target.unlink(missing_ok=True)
-                else:
-                    target.write_bytes(original)
+                try:
+                    if original is None:
+                        target.unlink(missing_ok=True)
+                    else:
+                        # Same staged replacement as `Creations.restore`, for the
+                        # same reason: a torn write here left partial bytes in a
+                        # local archive, and this rollback is the last thing
+                        # standing between a failed operation and the operator's
+                        # history.
+                        _atomic_write(self.history_dir, target, original)
+                except OSError:
+                    unrestored.append(str(target))
+            if unrestored:
+                # `commit` owns both halves here, so it composes them itself: the
+                # staged-write failure that triggered the rollback, and the
+                # targets the rollback could not put back. Raising only the
+                # second would replace the operator's actual cause (#102).
+                raise VaultError(
+                    f"{exc}; additionally the rollback could not restore these to "
+                    "their pre-operation bytes: " + ", ".join(sorted(unrestored))
+                ) from exc
             raise
 
 
@@ -1284,11 +1331,31 @@ def _publish(
             written += 1
         _write_recorded(root, state_path(path), render_vault_state(state), record)
         _write_recorded(root, path / MARKER_FILENAME, render_marker(project_id), record)
-    except Exception:
+    except Exception as exc:
         if created is None:
             # Folder mode has no outer transport: this call owns both halves.
-            record.restore()
-            record.undo()
+            unrestored: list[str] = []
+            try:
+                unrestored = record.restore()
+            finally:
+                # Unconditional. `undo()` deletes the files this publication
+                # created, and a created file surviving a failed publication
+                # breaks AC1's *file set* independently of any bytes. `restore()`
+                # reports rather than raises, so today this cannot be skipped —
+                # the `finally` keeps that true if it ever raises for a reason
+                # this loop does not catch, rather than resting on a promise made
+                # in another function (@re1, PR #132).
+                record.undo()
+            if unrestored:
+                # One message, both causes. The publication failure is why the
+                # rollback ran; the rollback's own failures are what the operator
+                # must act on. Neither may hide the other (#102, shape from #127).
+                raise VaultError(
+                    f"{exc}; additionally the rollback could not restore these to "
+                    "their pre-operation bytes — they hold this operation's "
+                    "content, with no staging residue left: "
+                    + ", ".join(unrestored)
+                ) from exc
         raise
 
 
@@ -1850,7 +1917,7 @@ def _write_recorded(root: Path, target: Path, text: str, record: "Creations") ->
     if existed:
         # Captured before the replace, so a rollback can put back exactly what
         # this call displaced rather than whatever a later step left.
-        record.replaced.append((target, target.read_bytes()))
+        record.replaced.append((root, target, target.read_bytes()))
     else:
         record.files.append(target)
 
