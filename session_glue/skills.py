@@ -110,10 +110,22 @@ def _reject_overlapping_destinations() -> None:
     the outer agent's uninstall would refuse on files that are not extras at all,
     and its `--replace` install would refuse likewise.
 
-    This is *not* the mechanism that rejects an intermediate symlink; that is
-    `_unmanaged_extras` (a symlinked directory is `is_symlink()`, a real one is
-    skipped) and it is untouched here. This guards a different failure: valid
-    bundle data that quietly breaks the ownership boundary between agents.
+    This guards none of the symlink cases, and nothing here changes them. Stating
+    that precisely, because getting it wrong is what #103 existed to correct:
+
+    - **Containment** — a write escaping the scope root, including through a
+      symlinked *ancestor* — is `_assert_within` (`:67`), called from
+      `apply_install` and `apply_uninstall` before any write.
+    - `_unmanaged_extras` refuses *some* symlink shapes as a side effect of
+      listing entries, since a symlinked directory is `is_symlink()` while a real
+      one is skipped. It is not a containment guard and must not be credited as
+      one: given a symlinked ancestor whose contents are exactly the managed set,
+      it does not refuse at all, and `_assert_within` is what stops the escape
+      (@re1, PR #133; the case is pinned by #92's
+      `test_install_replace_through_a_symlinked_ancestor_deletes_nothing`).
+
+    What this function guards is a different failure entirely: valid bundle data
+    quietly breaking the ownership boundary between agents.
 
     Checked at planning time rather than at import, so bad data fails the
     operation loudly instead of making the package unimportable — and so a
