@@ -3373,7 +3373,7 @@ def test_a_torn_creations_restore_never_leaves_partial_bytes(tmp_path, monkeypat
     published = target.read_bytes()
 
     _tear_bytes_for(monkeypatch, "a.md")
-    with pytest.raises(OSError):
+    with pytest.raises(vault.VaultError, match="could not restore"):
         record.restore()
     monkeypatch.undo()
 
@@ -3419,7 +3419,7 @@ def test_a_torn_local_rollback_never_leaves_partial_bytes(tmp_path, monkeypatch)
         return real(self, data)
 
     monkeypatch.setattr(pathlib.Path, "write_bytes", torn)
-    with pytest.raises(OSError):
+    with pytest.raises(vault.VaultError, match="could not restore"):
         # `fault_after=1` lands the forward write, then forces the rollback.
         write.commit(fault_after=1)
     monkeypatch.undo()
@@ -3477,3 +3477,58 @@ def test_an_operator_bare_partial_file_is_never_this_tools_staging_artifact(tmp_
         "a rollback consumed an operator's bare .partial file"
     )
     assert target.read_bytes() == b"published\n"
+
+
+def test_one_unrestorable_target_does_not_abandon_the_others(tmp_path, monkeypatch):
+    """AC1: a failed entry must not cost the entries after it.
+
+    `restore` raised on the first failure, so one unwritable target left every
+    *later* entry holding the publication's bytes with nothing said about them.
+    Measured on the pre-fix tree with three targets and the middle one failing:
+    one restored, two not. AC1 asks for the full pre-operation set, so the
+    rollback now restores everything it can and names what it could not.
+
+    Three targets and not two, because `restore` walks `reversed(replaced)`: with
+    only two, a failure on the second is indistinguishable from stopping.
+    """
+    root = tmp_path / "vault"
+    (root / vault.SESSIONS_DIRNAME).mkdir(parents=True)
+    names = ["a.md", "b.md", "c.md"]
+    originals = {n: f"ORIGINAL {n}\n".encode() for n in names}
+    record = vault.Creations()
+    for name in names:
+        target = root / vault.SESSIONS_DIRNAME / name
+        target.write_bytes(originals[name])
+        vault._write_recorded(root, target, f"PUBLISHED {name}\n", record)
+
+    real = pathlib.Path.write_bytes
+
+    def fail_only_b(self, data):
+        if self.name.startswith("b.md"):
+            raise OSError("simulated disk-full mid-write")
+        return real(self, data)
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", fail_only_b)
+    # Both exception types are caught so the *state* assertions below are what
+    # discriminate: a rollback that raises immediately fails on the abandoned
+    # entry with a message saying so, rather than on the exception class.
+    with pytest.raises((OSError, vault.VaultError)) as caught:
+        record.restore()
+    monkeypatch.undo()
+
+    sessions = root / vault.SESSIONS_DIRNAME
+    assert (sessions / "c.md").read_bytes() == originals["c.md"], "the entry before the failure"
+    assert (sessions / "a.md").read_bytes() == originals["a.md"], (
+        "the entry after the failure was abandoned"
+    )
+    assert (sessions / "b.md").read_bytes() == b"PUBLISHED b.md\n", (
+        "the unwritable target must keep complete bytes, never a torn write"
+    )
+    assert isinstance(caught.value, vault.VaultError), (
+        "the rollback must report its failures, not let the write's error escape"
+    )
+    assert "b.md" in str(caught.value)
+    assert "a.md" not in str(caught.value) and "c.md" not in str(caught.value), (
+        "only what could not be restored may be named"
+    )
+    assert not list(sessions.glob("*" + vault.STAGING_SUFFIX)), "staging residue"

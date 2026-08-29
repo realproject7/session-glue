@@ -694,6 +694,7 @@ class Creations:
         because a transport that restores tracked bytes by other means must not
         also run this — see the class docstring.
         """
+        unrestored: list[str] = []
         for root, target, original in reversed(self.replaced):
             # Staged and replaced, never written in place (#102). An in-place
             # `write_bytes` that fails part-way left the target holding neither
@@ -701,7 +702,22 @@ class Creations:
             # restore of 42 bytes left 21 — so the rollback destroyed the file it
             # exists to save. A failure here now leaves the target untouched and
             # removes the sibling it staged into.
-            _atomic_write(Path(root), Path(target), original)
+            try:
+                _atomic_write(Path(root), Path(target), original)
+            except OSError:
+                # Recorded and carried on, never abandoned. Raising here stopped
+                # the loop, so one unwritable target left every *later* entry
+                # holding the publication's bytes with nothing said about them —
+                # measured, one failure of three restored one instead of two.
+                # AC1 asks for the full pre-operation set, so the rollback
+                # restores everything it can and names what it could not.
+                unrestored.append(str(target))
+        if unrestored:
+            raise VaultError(
+                "rollback could not restore these to their pre-operation bytes; "
+                "they hold this operation's content and no staging residue "
+                "remains: " + ", ".join(sorted(unrestored))
+            )
 
     def undo(self) -> None:
         """Delete created files, then prune the directories they needed.
@@ -771,15 +787,27 @@ class LocalWrite:
                 applied.append((target, original))
                 target.write_bytes(self._staged[relative_path])
         except Exception:
+            unrestored: list[str] = []
             for target, original in reversed(applied):
-                if original is None:
-                    target.unlink(missing_ok=True)
-                else:
-                    # Same staged replacement as `Creations.restore`, for the
-                    # same reason: a torn write here left partial bytes in a
-                    # local archive, and this rollback is the last thing standing
-                    # between a failed operation and the operator's history.
-                    _atomic_write(self.history_dir, target, original)
+                try:
+                    if original is None:
+                        target.unlink(missing_ok=True)
+                    else:
+                        # Same staged replacement as `Creations.restore`, for the
+                        # same reason: a torn write here left partial bytes in a
+                        # local archive, and this rollback is the last thing
+                        # standing between a failed operation and the operator's
+                        # history.
+                        _atomic_write(self.history_dir, target, original)
+                except OSError:
+                    unrestored.append(str(target))
+            if unrestored:
+                # Chained, not swallowed: the original failure is why the
+                # rollback ran at all, and it stays reachable as `__context__`.
+                raise VaultError(
+                    "rollback could not restore these to their pre-operation "
+                    "bytes: " + ", ".join(sorted(unrestored))
+                )
             raise
 
 
