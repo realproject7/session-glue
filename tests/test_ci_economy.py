@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -6,8 +7,17 @@ FAST = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 FULL = (ROOT / ".github" / "workflows" / "ci-full.yml").read_text(encoding="utf-8")
 
 
+def pull_request_types(workflow: str) -> set[str]:
+    match = re.search(
+        r"(?m)^  pull_request:\n    types: \[([^]]+)]$",
+        workflow,
+    )
+    assert match is not None, "workflow has no single-line pull_request types declaration"
+    return {item.strip() for item in match.group(1).split(",")}
+
+
 def test_ordinary_pushes_have_one_canonical_smoke_job() -> None:
-    assert "types: [opened, synchronize, reopened]" in FAST
+    assert pull_request_types(FAST) == {"opened", "synchronize", "reopened"}
     assert "branches: [main]" in FAST
     assert "python-version: \"3.12\"" in FAST
     assert "matrix:" not in FAST
@@ -15,10 +25,9 @@ def test_ordinary_pushes_have_one_canonical_smoke_job() -> None:
 
 
 def test_full_matrix_is_candidate_triggered_not_synchronize_triggered() -> None:
-    assert "types: [opened, ready_for_review, labeled]" in FULL
+    assert pull_request_types(FULL) == {"opened", "ready_for_review", "labeled"}
     assert "github.event.label.name == 'ci:full'" in FULL
     assert "github.event.pull_request.draft == false" in FULL
-    assert "synchronize" not in FULL
 
 
 def test_full_matrix_preserves_every_supported_python_and_os() -> None:
