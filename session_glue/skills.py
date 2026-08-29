@@ -100,6 +100,39 @@ def scope_root(scope: str, repo_root: str | Path = ".", home: str | Path | None 
     raise SkillInstallError(f"unknown scope: {scope!r}; expected one of {SCOPES}")
 
 
+def _reject_overlapping_destinations() -> None:
+    """Refuse when two agents' configured destinations overlap (#103).
+
+    Adding an agent is a data change, and the data carries an invariant the code
+    silently depends on: no destination may equal, or be a directory ancestor of,
+    another. If one did, the nested agent's files would land inside the outer
+    agent's target, where `_unmanaged_extras` classifies them as unmanaged — so
+    the outer agent's uninstall would refuse on files that are not extras at all,
+    and its `--replace` install would refuse likewise.
+
+    This is *not* the mechanism that rejects an intermediate symlink; that is
+    `_unmanaged_extras` (a symlinked directory is `is_symlink()`, a real one is
+    skipped) and it is untouched here. This guards a different failure: valid
+    bundle data that quietly breaks the ownership boundary between agents.
+
+    Checked at planning time rather than at import, so bad data fails the
+    operation loudly instead of making the package unimportable — and so a
+    data-only fixture can exercise it before anything is planned or written.
+    """
+    configured = sorted(SKILL_SUBPATHS.items())
+    for agent, destination in configured:
+        for other_agent, other in configured:
+            if agent == other_agent:
+                continue
+            if destination == other or destination in other.parents:
+                raise SkillInstallError(
+                    "configured skill destinations overlap, so one agent's files "
+                    "would sit inside another's managed folder: "
+                    f"{agent!r} -> {destination.as_posix()} equals or contains "
+                    f"{other_agent!r} -> {other.as_posix()}"
+                )
+
+
 def skill_target(
     agent: str, scope: str, repo_root: str | Path = ".", home: str | Path | None = None
 ) -> Path:
@@ -187,6 +220,7 @@ def plan_install(
     replace: bool = False,
 ) -> SkillPlan:
     """Validate and plan an install; raise :class:`SkillInstallError` if unsafe."""
+    _reject_overlapping_destinations()  # data invariant, before any path is built
     files = managed_files(agent)  # validates the agent and derives the file set
     root = scope_root(scope, repo_root, home)
     target = root / SKILL_SUBPATHS[agent]
@@ -248,6 +282,7 @@ def plan_uninstall(
     home: str | Path | None = None,
 ) -> SkillPlan:
     """Validate and plan an uninstall; raise if not installed or unsafe."""
+    _reject_overlapping_destinations()  # data invariant, before any path is built
     files = managed_files(agent)  # validates the agent and derives the file set
     root = scope_root(scope, repo_root, home)
     target = root / SKILL_SUBPATHS[agent]
