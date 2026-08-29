@@ -3587,3 +3587,54 @@ def test_a_failed_rollback_never_replaces_the_publication_failure(tmp_path, monk
         "the unrestorable target must keep complete bytes, never a torn write"
     )
     assert not list((namespace / vault.SESSIONS_DIRNAME).glob("*" + vault.STAGING_SUFFIX))
+
+
+def test_a_failed_restore_still_removes_what_the_publication_created(tmp_path, monkeypatch):
+    """AC1's *file set* half, which is separable from its bytes half.
+
+    A publication that replaces one archive and creates another, then fails at
+    the marker, must leave neither behind. `record.undo()` is what deletes the
+    created file — and it runs *after* `record.restore()`, so a restore that
+    raised skipped it and the vault kept a file it never had. The bytes question
+    for the unrestorable target is a different one and stays open; this is only
+    about the file set, which is achievable in every arm.
+    """
+    vault_root = tmp_path / "vault"
+    namespace = vault_root / vault.PROJECTS_DIRNAME / "alpha"
+    (namespace / vault.SESSIONS_DIRNAME).mkdir(parents=True)
+    (namespace / vault.SESSIONS_DIRNAME / "a.md").write_bytes(b"ORIGINAL a\n")
+    created = namespace / vault.SESSIONS_DIRNAME / "b.md"
+    before = sorted(p.name for p in (namespace / vault.SESSIONS_DIRNAME).iterdir())
+
+    real_text, real_bytes = pathlib.Path.write_text, pathlib.Path.write_bytes
+
+    def fail_the_marker(self, data, **kwargs):
+        if self.name.startswith(vault.MARKER_FILENAME):
+            raise OSError(5, "publication failed writing the marker")
+        return real_text(self, data, **kwargs)
+
+    def fail_restoring_a(self, data):
+        if self.name.startswith("a.md") and vault.STAGING_SUFFIX in self.name:
+            raise OSError(28, "No space left on device")
+        return real_bytes(self, data)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", fail_the_marker)
+    monkeypatch.setattr(pathlib.Path, "write_bytes", fail_restoring_a)
+    with pytest.raises(vault.VaultError) as caught:
+        vault._publish(
+            vault_root,
+            namespace,
+            {f"{vault.SESSIONS_DIRNAME}/a.md": "PUBLISHED a\n",
+             f"{vault.SESSIONS_DIRNAME}/b.md": "PUBLISHED b\n"},
+            {"head_session_id": "", "lifecycle": [], "acknowledgements": []},
+            "alpha",
+        )
+    monkeypatch.undo()
+
+    assert not created.exists(), (
+        "the publication's created file survived a failed rollback"
+    )
+    assert sorted(p.name for p in (namespace / vault.SESSIONS_DIRNAME).iterdir()) == before
+    assert "writing the marker" in str(caught.value), "the publication cause was lost"
+    assert "a.md" in str(caught.value), "the unrestored target was not named"
+    assert not list((namespace / vault.SESSIONS_DIRNAME).glob("*" + vault.STAGING_SUFFIX))

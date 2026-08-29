@@ -1334,8 +1334,18 @@ def _publish(
     except Exception as exc:
         if created is None:
             # Folder mode has no outer transport: this call owns both halves.
-            unrestored = record.restore()
-            record.undo()
+            unrestored: list[str] = []
+            try:
+                unrestored = record.restore()
+            finally:
+                # Unconditional. `undo()` deletes the files this publication
+                # created, and a created file surviving a failed publication
+                # breaks AC1's *file set* independently of any bytes. `restore()`
+                # reports rather than raises, so today this cannot be skipped —
+                # the `finally` keeps that true if it ever raises for a reason
+                # this loop does not catch, rather than resting on a promise made
+                # in another function (@re1, PR #132).
+                record.undo()
             if unrestored:
                 # One message, both causes. The publication failure is why the
                 # rollback ran; the rollback's own failures are what the operator
