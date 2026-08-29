@@ -686,8 +686,15 @@ class Creations:
         # stage inside the tree without changing that constructor.
         self.replaced: list[tuple[Path, Path, bytes]] = []
 
-    def restore(self) -> None:
+    def restore(self) -> list[str]:
         """Put back the bytes this publication displaced (#93).
+
+        Returns the targets it could not restore, rather than raising (#102).
+        This runs *inside* the caller's `except` handler, so an exception thrown
+        here would become the error the operator sees and demote the publication
+        failure that caused the rollback to `__context__`. #127 settled that for
+        `restore_quarantined`: report outcomes, let the caller compose one
+        message carrying the original cause and the rollback's own failures.
 
         Reverse order, so a target replaced twice in one publication returns to
         the bytes it held before the *first* write. Separate from :meth:`undo`
@@ -712,12 +719,7 @@ class Creations:
                 # AC1 asks for the full pre-operation set, so the rollback
                 # restores everything it can and names what it could not.
                 unrestored.append(str(target))
-        if unrestored:
-            raise VaultError(
-                "rollback could not restore these to their pre-operation bytes; "
-                "they hold this operation's content and no staging residue "
-                "remains: " + ", ".join(sorted(unrestored))
-            )
+        return sorted(unrestored)
 
     def undo(self) -> None:
         """Delete created files, then prune the directories they needed.
@@ -786,7 +788,7 @@ class LocalWrite:
                 original = target.read_bytes() if target.is_file() else None
                 applied.append((target, original))
                 target.write_bytes(self._staged[relative_path])
-        except Exception:
+        except Exception as exc:
             unrestored: list[str] = []
             for target, original in reversed(applied):
                 try:
@@ -802,12 +804,14 @@ class LocalWrite:
                 except OSError:
                     unrestored.append(str(target))
             if unrestored:
-                # Chained, not swallowed: the original failure is why the
-                # rollback ran at all, and it stays reachable as `__context__`.
+                # `commit` owns both halves here, so it composes them itself: the
+                # staged-write failure that triggered the rollback, and the
+                # targets the rollback could not put back. Raising only the
+                # second would replace the operator's actual cause (#102).
                 raise VaultError(
-                    "rollback could not restore these to their pre-operation "
-                    "bytes: " + ", ".join(sorted(unrestored))
-                )
+                    f"{exc}; additionally the rollback could not restore these to "
+                    "their pre-operation bytes: " + ", ".join(sorted(unrestored))
+                ) from exc
             raise
 
 
@@ -1327,11 +1331,21 @@ def _publish(
             written += 1
         _write_recorded(root, state_path(path), render_vault_state(state), record)
         _write_recorded(root, path / MARKER_FILENAME, render_marker(project_id), record)
-    except Exception:
+    except Exception as exc:
         if created is None:
             # Folder mode has no outer transport: this call owns both halves.
-            record.restore()
+            unrestored = record.restore()
             record.undo()
+            if unrestored:
+                # One message, both causes. The publication failure is why the
+                # rollback ran; the rollback's own failures are what the operator
+                # must act on. Neither may hide the other (#102, shape from #127).
+                raise VaultError(
+                    f"{exc}; additionally the rollback could not restore these to "
+                    "their pre-operation bytes — they hold this operation's "
+                    "content, with no staging residue left: "
+                    + ", ".join(unrestored)
+                ) from exc
         raise
 
 

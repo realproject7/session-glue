@@ -3373,9 +3373,10 @@ def test_a_torn_creations_restore_never_leaves_partial_bytes(tmp_path, monkeypat
     published = target.read_bytes()
 
     _tear_bytes_for(monkeypatch, "a.md")
-    with pytest.raises(vault.VaultError, match="could not restore"):
-        record.restore()
+    unrestored = record.restore()
     monkeypatch.undo()
+
+    assert unrestored == [str(target)], "the failure must be reported, not raised"
 
     now = target.read_bytes()
     assert now in (original, published), f"target left in a torn state: {now!r}"
@@ -3509,11 +3510,12 @@ def test_one_unrestorable_target_does_not_abandon_the_others(tmp_path, monkeypat
         return real(self, data)
 
     monkeypatch.setattr(pathlib.Path, "write_bytes", fail_only_b)
-    # Both exception types are caught so the *state* assertions below are what
-    # discriminate: a rollback that raises immediately fails on the abandoned
-    # entry with a message saying so, rather than on the exception class.
-    with pytest.raises((OSError, vault.VaultError)) as caught:
-        record.restore()
+    # A rollback that raises instead of reporting fails the *state* assertions
+    # below, which is where the abandonment shows — not on an exception class.
+    try:
+        unrestored = record.restore()
+    except OSError:
+        unrestored = ["<raised instead of reporting>"]
     monkeypatch.undo()
 
     sessions = root / vault.SESSIONS_DIRNAME
@@ -3524,11 +3526,64 @@ def test_one_unrestorable_target_does_not_abandon_the_others(tmp_path, monkeypat
     assert (sessions / "b.md").read_bytes() == b"PUBLISHED b.md\n", (
         "the unwritable target must keep complete bytes, never a torn write"
     )
-    assert isinstance(caught.value, vault.VaultError), (
-        "the rollback must report its failures, not let the write's error escape"
-    )
-    assert "b.md" in str(caught.value)
-    assert "a.md" not in str(caught.value) and "c.md" not in str(caught.value), (
-        "only what could not be restored may be named"
+    assert unrestored == [str(sessions / "b.md")], (
+        "the rollback must report exactly what it could not restore"
     )
     assert not list(sessions.glob("*" + vault.STAGING_SUFFIX)), "staging residue"
+
+
+def test_a_failed_rollback_never_replaces_the_publication_failure(tmp_path, monkeypatch):
+    """#102: one message, both causes — asserted through `_publish` itself.
+
+    `Creations.restore` runs inside `_publish`'s `except` handler. An exception
+    raised there becomes the error the operator sees, demoting the publication
+    failure that caused the rollback to `__context__` — the operator is told the
+    rollback could not write while never learning what went wrong first. #127
+    settled the pattern for `restore_quarantined`: report outcomes, let the
+    caller compose. Neither cause may hide the other.
+
+    Driven through the real `_publish` handler rather than by re-implementing the
+    composition here: a test that rebuilds the logic it is checking passes
+    whatever production does.
+    """
+    vault_root = tmp_path / "vault"
+    namespace = vault_root / vault.PROJECTS_DIRNAME / "alpha"
+    (namespace / vault.SESSIONS_DIRNAME).mkdir(parents=True)
+    held = namespace / vault.SESSIONS_DIRNAME / "held.md"
+    held.write_bytes(b"ORIGINAL held\n")
+
+    real = pathlib.Path.write_bytes
+
+    def fail_the_rollback(self, data):
+        # Only the rollback's staging write. The forward publication write goes
+        # through `write_text`, so it is untouched and the fault is aimed
+        # squarely at the restore.
+        if self.name.startswith("held.md") and vault.STAGING_SUFFIX in self.name:
+            raise OSError("simulated disk-full mid-write")
+        return real(self, data)
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", fail_the_rollback)
+    with pytest.raises(vault.VaultError) as caught:
+        # `fault_after=1` lands the first write, then fails the publication, so
+        # the handler has something recorded to roll back.
+        vault._publish(
+            vault_root,
+            namespace,
+            {f"{vault.SESSIONS_DIRNAME}/held.md": "PUBLISHED held\n",
+             f"{vault.SESSIONS_DIRNAME}/other.md": "PUBLISHED other\n"},
+            {"head_session_id": "", "lifecycle": [], "acknowledgements": []},
+            "alpha",
+            fault_after=1,
+        )
+    monkeypatch.undo()
+
+    message = str(caught.value)
+    assert "injected publication fault" in message, (
+        "the rollback failure replaced the cause the operator needs"
+    )
+    assert "held.md" in message, "the unrestored target was not named"
+    assert caught.value.__cause__ is not None, "the original must stay chained"
+    assert held.read_bytes() == b"PUBLISHED held\n", (
+        "the unrestorable target must keep complete bytes, never a torn write"
+    )
+    assert not list((namespace / vault.SESSIONS_DIRNAME).glob("*" + vault.STAGING_SUFFIX))
