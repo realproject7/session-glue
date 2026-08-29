@@ -127,7 +127,6 @@ def test_changelog_cuts_0_4_0_below_an_empty_unreleased():
     release = CHANGELOG.split("## [0.4.0] - 2026-08-29", 1)[1].split("## [0.3.1]", 1)[0]
 
     assert unreleased.strip() == "", "the Unreleased section must be literally empty"
-    assert "_Nothing yet._" not in unreleased, "no placeholder either (#134 defines empty)"
     assert "Personal Vault" in release, "the vault notes belong to the 0.4.0 release"
     assert CHANGELOG.index("## [Unreleased]") < CHANGELOG.index(
         "## [0.4.0] - 2026-08-29"
