@@ -25,7 +25,12 @@ def test_ordinary_pushes_have_one_canonical_smoke_job() -> None:
 
 
 def test_full_matrix_is_candidate_triggered_not_synchronize_triggered() -> None:
-    assert pull_request_types(FULL) == {"opened", "ready_for_review", "labeled"}
+    assert pull_request_types(FULL) == {
+        "opened",
+        "reopened",
+        "ready_for_review",
+        "labeled",
+    }
     assert "github.event.label.name == 'ci:full'" in FULL
     assert "github.event.pull_request.draft == false" in FULL
 

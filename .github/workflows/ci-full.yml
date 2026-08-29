@@ -2,7 +2,7 @@ name: CI Full Candidate
 
 on:
   pull_request:
-    types: [opened, ready_for_review, labeled]
+    types: [opened, reopened, ready_for_review, labeled]
   push:
     tags: ["v*"]
   schedule:
@@ -18,14 +18,15 @@ concurrency:
 
 jobs:
   test:
-    # A non-draft PR open is its first candidate. Drafts wait for
+    # A non-draft PR open/reopen is its first candidate. Drafts wait for
     # ready_for_review; later candidates remove/re-add ci:full only after one
     # consolidated fix push. Ordinary synchronize events never enter this file.
     if: >-
       github.event_name != 'pull_request' ||
       github.event.action == 'ready_for_review' ||
       github.event.label.name == 'ci:full' ||
-      (github.event.action == 'opened' && github.event.pull_request.draft == false)
+      ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+       github.event.pull_request.draft == false)
     name: py${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -68,7 +69,8 @@ jobs:
       (github.event_name != 'pull_request' ||
        github.event.action == 'ready_for_review' ||
        github.event.label.name == 'ci:full' ||
-       (github.event.action == 'opened' && github.event.pull_request.draft == false))
+       ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+        github.event.pull_request.draft == false))
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
