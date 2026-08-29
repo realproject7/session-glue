@@ -9,6 +9,8 @@ Releases are built and published from CI going forward.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-29
+
 ### Added
 
 - **Personal Vault — opt-in sync of `.agent-history/` between your own devices.** New

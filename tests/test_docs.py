@@ -104,12 +104,27 @@ def test_readme_covers_the_scenarios_the_ticket_requires():
     assert not missing, f"README no longer covers: {missing}"
 
 
-def test_changelog_records_the_feature_without_publishing_it():
-    unreleased = CHANGELOG.split("## [Unreleased]", 1)[1].split("## [0.3.1]", 1)[0]
-    assert "Personal Vault" in unreleased
-    assert "_Nothing yet._" not in unreleased
-    # Release notes only: this ticket documents, it does not cut a version.
-    assert "## [0.4.0]" not in CHANGELOG
+def test_changelog_cuts_0_4_0_below_an_empty_unreleased():
+    """The vault notes sit in the dated release, with nothing above it (#134).
+
+    Replaces an assertion that `## [0.4.0]` was *absent* — correct while #81 was
+    documenting a feature it deliberately did not release, and a prohibition on
+    the deliverable once this ticket cut the version.
+
+    **Each slice ends at the next heading, which is the whole point.** The old
+    span ran `[Unreleased]`→`[0.3.1]`, so once `[0.4.0]` appeared between them the
+    range swallowed it: `"Personal Vault" in unreleased` stayed green with the
+    notes no longer in Unreleased at all, and could not fail for the property its
+    name stated. A section test whose slice does not stop at the next heading
+    stops discriminating the moment a section is inserted.
+    """
+    unreleased = CHANGELOG.split("## [Unreleased]", 1)[1].split("## [0.4.0]", 1)[0]
+    release = CHANGELOG.split("## [0.4.0] - 2026-08-29", 1)[1].split("## [0.3.1]", 1)[0]
+
+    assert unreleased.strip() == "", "the Unreleased section must be literally empty"
+    assert "_Nothing yet._" not in unreleased, "no placeholder either (#134 defines empty)"
+    assert "Personal Vault" in release, "the vault notes belong to the 0.4.0 release"
+    assert CHANGELOG.index("## [Unreleased]") < CHANGELOG.index("## [0.4.0] - 2026-08-29")
 
 
 # --------------------------------------------------------------------------- #
