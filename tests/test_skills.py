@@ -19,12 +19,14 @@ from session_glue.cli import main
 
 AGENTS = ("codex", "claude")
 
-# Expected per-agent target subpath and top-level repo dir.
-_SUBPATH = {
-    "codex": Path(".agents") / "skills" / "session-glue",
-    "claude": Path(".claude") / "skills" / "session-glue",
-}
-_TOP_DIR = {"codex": ".agents", "claude": ".claude"}
+# Derived from production rather than restated (#103). These were hand-copied
+# duplicates of `SKILL_SUBPATHS`, and nothing tied them back -- the only
+# assertion touching that mapping compared its *keys*, so a changed destination
+# would leave every test here computing the old path and still passing. The
+# values themselves are pinned once, explicitly, in
+# `test_supported_agents_and_their_destinations`.
+_SUBPATH = dict(skills.SKILL_SUBPATHS)
+_TOP_DIR = {agent: path.parts[0] for agent, path in skills.SKILL_SUBPATHS.items()}
 
 # Managed bundle-relative files per agent (Claude ships no agents/openai.yaml).
 _MANAGED = {
@@ -68,9 +70,19 @@ def test_managed_files_rejects_unsupported_agent():
         skills.managed_files("gemini")
 
 
-def test_supported_agents_are_the_subpath_keys():
+def test_supported_agents_and_their_destinations():
+    """The one place the shipped destinations are stated literally (#103).
+
+    `_SUBPATH` and `_TOP_DIR` are derived, so this is what stops a destination
+    changing unnoticed: deriving removes the drift, and this restores the check
+    the drifting copy was accidentally providing.
+    """
     assert set(skills.SUPPORTED_AGENTS) == set(skills.SKILL_SUBPATHS)
     assert set(skills.SUPPORTED_AGENTS) == {"codex", "claude"}
+    assert {agent: path.as_posix() for agent, path in skills.SKILL_SUBPATHS.items()} == {
+        "codex": ".agents/skills/session-glue",
+        "claude": ".claude/skills/session-glue",
+    }
 
 
 def test_targets_are_per_agent_and_codex_is_unchanged(tmp_path):
@@ -598,3 +610,61 @@ def test_a_valid_bundle_is_unaffected_by_the_new_preflight(tmp_path, agent):
         assert (_target(repo, agent) / rel).read_bytes() == _bundle_bytes(agent, rel)
     assert _uninstall(repo, agent) == 0
     assert not _target(repo, agent).exists()
+
+
+# --------------------------------------------------------------------------- #
+# #103 — cross-agent destination invariant
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "conflicting, why",
+    [
+        (
+            {"codex": Path(".agents"), "claude": Path(".agents") / "skills" / "session-glue"},
+            "one destination is a directory ancestor of another",
+        ),
+        (
+            {"codex": Path(".shared") / "skills", "claude": Path(".shared") / "skills"},
+            "two agents share the same destination",
+        ),
+    ],
+    ids=["ancestor", "equal"],
+)
+@pytest.mark.parametrize("plan", ["install", "uninstall"])
+def test_conflicting_destinations_fail_before_planning(
+    tmp_path, monkeypatch, conflicting, why, plan
+):
+    """AC2: a data-only change that breaks the invariant fails loudly, before anything.
+
+    Data-only in the strict sense -- nothing but `SKILL_SUBPATHS` is touched, no
+    bundle and no filesystem state. `managed_files()` entries cannot express this
+    at all: a real tree cannot hold a file `agents` beside `agents/openai.yaml`,
+    which is why the amended contract scopes the invariant to these destination
+    values and excludes bundle-relative paths by name.
+
+    Asserted on both plan entry points, since install and uninstall must stay
+    symmetric, and asserted to fail with **nothing written** -- the point is that
+    it refuses before planning or mutation, not that it refuses eventually.
+    """
+    monkeypatch.setattr(skills, "SKILL_SUBPATHS", conflicting)
+    monkeypatch.setattr(skills, "SUPPORTED_AGENTS", tuple(conflicting))
+    before = sorted(p.name for p in tmp_path.iterdir())
+
+    with pytest.raises(skills.SkillInstallError) as caught:
+        if plan == "install":
+            skills.plan_install("codex", "repo", repo_root=tmp_path)
+        else:
+            skills.plan_uninstall("codex", "repo", repo_root=tmp_path)
+
+    message = str(caught.value)
+    assert "destinations overlap" in message, f"unexpected refusal ({why}): {message}"
+    assert "codex" in message and "claude" in message, "both sides must be named"
+    assert sorted(p.name for p in tmp_path.iterdir()) == before, (
+        "the refusal must come before anything is created"
+    )
+
+
+def test_the_shipped_destinations_satisfy_the_invariant():
+    """The guard is only useful if the data it guards currently passes."""
+    skills._reject_overlapping_destinations()
