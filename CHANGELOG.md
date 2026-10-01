@@ -53,6 +53,8 @@ Releases are built and published from CI going forward.
 
 ### Changed
 
+- Codex and Claude skills preserve compact outcome, role, authority and gate context on resume. They check current index lifecycle and git drift, reconcile applicable instructions and load references only for the current decision. README distinguishes visible context from cached/billed tokens and recommends meaningful continuity checkpoints. No schema, CLI, installer or vault behavior changed.
+
 - README and `glue sync --help` now state the v1 limits directly: no provider APIs (Dropbox,
   Google Drive, GitHub), no OAuth, no token storage, no credential request/read/parse, no
   automatic repository creation, no daemon, no automatic sync, no encryption, and no

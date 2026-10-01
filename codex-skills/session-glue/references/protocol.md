@@ -131,6 +131,28 @@ All eight headings are REQUIRED and validation enforces them: `glue create` and
 line start with the exact `# ` heading text. Validation checks heading presence
 only — it never inspects or scores the prose beneath them.
 
+### Compact continuity context
+
+Use the existing body sections, not new schema fields. In Current State and
+Risks And Constraints, preserve the assigned role/owner, current acceptance,
+existing authorization, operator pauses and review/device/release gates. Record
+which applicable instruction sources matter and why; include a revision when it
+pins a contract. Keep working changes and evidence separate from completed work.
+
+The handoff carries state and provenance, not new authority. On resume reconcile
+it with current applicable instructions. Read LATEST first, then current lifecycle
+from `glue status` or INDEX.yaml: `glue close` can change that lifecycle without
+rewriting LATEST. Check branch/HEAD as well as working-tree drift. Respect holds
+and do not restart completed work merely because an archived next action remains.
+
+A canonical resume prompt is sufficient when the destination can access the
+handoff and its applicable instructions. Load only reference sections needed for
+the current decision. If required context is unavailable or contradictory,
+resolve that boundary before dependent work; do not paste entire manuals or raw
+transcripts into every handoff. Carry only live constraints and useful decisions,
+with links to detailed evidence. Checkpoint at a meaningful continuity boundary,
+not every implementation step or review fix.
+
 ## RESUME_PROMPT.txt
 
 Write a short paste-ready prompt:
