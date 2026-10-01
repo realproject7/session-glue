@@ -13,12 +13,12 @@ No daemon. No server. No database. No network by default. Just markdown files in
 
 ## The problem
 
-Long coding-agent sessions degrade in a predictable way:
+Long sessions can accumulate stale or irrelevant context:
 
-- **Context bloat** — old logs, diffs, and dead ends stay in context; every new turn re-reads material that no longer matters.
-- **Rising cost and latency** — you pay for that bloat on every single turn.
-- **Memory drift** — the agent starts forgetting earlier constraints and re-litigating decisions you already made.
-- **Bad restarts** — clearing the session loses the work state, so the next session burns thousands of tokens re-scanning the repo to figure out where things stand.
+- **Context bloat** — logs, diffs and abandoned paths can crowd out useful state.
+- **Cost and latency** — redundant context and coordination can add work. Repeated prefixes may be cached; visible context size is not the same as billed uncached tokens.
+- **Memory drift** — important constraints can become harder to retrieve.
+- **Bad restarts** — a fresh session without a handoff must reconstruct the work state.
 
 The usual escape hatch is "paste a messy summary into a new chat and hope." Session Glue replaces that with a disciplined, validated engineering handoff.
 
@@ -48,7 +48,26 @@ Session Glue cuts one long conversation into two clean ones — and carries the 
 └────────────────────────────────────────────────────┘
 ```
 
-The expensive, drifting part — the raw chat history — is thrown away. What survives is the handoff: goal, constraints, what's done, what's next, and how to verify it, written as a few small files in your repo. A fresh session reads one of them and is instantly oriented, with no repo re-scan and no transcript to replay.
+The expensive, drifting part — the raw chat history — is thrown away. What survives is the handoff: goal, constraints, what's done, what's next, and how to verify it, written as a few small files in your repo. A fresh session starts from the handoff, then checks current state and relevant source files. It need not replay the transcript or scan the whole repository by default.
+
+### Resume with only the handoff prompt
+
+Paste the canonical resume prompt in a fresh session that can access the project
+and its applicable instructions. The handoff should preserve the current role,
+objective/acceptance, ownership, existing authorization, holds, working state and
+next productive action in the existing schema/body sections. Use context-file
+references with reasons rather than copying a workflow manual into every handoff.
+
+The receiving agent reads LATEST first, checks the current index lifecycle and
+branch/HEAD/working-tree drift, reconciles applicable instructions, then continues
+authorized work. A prompt cannot grant new authority or clear an operator pause,
+review gate or release gate. Missing essential context must be recovered before
+its dependent action. Read a general reference only for the relevant decision.
+
+Keep useful context through ordinary fixes. A handoff is for a meaningful restart
+or continuity boundary; it does not require a new session, ticket or PR for each
+internal step. Session Glue's installer owns only its dedicated skill folders;
+it does not set up or rewrite your global instructions.
 
 ### What that looks like on a real task
 
