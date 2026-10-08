@@ -1,0 +1,85 @@
+name: CI Full Candidate
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, labeled]
+  push:
+    tags: ["v*"]
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-full-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    # A non-draft PR open/reopen is its first candidate. Drafts wait for
+    # ready_for_review; later candidates remove/re-add ci:full only after one
+    # consolidated fix push. Ordinary synchronize events never enter this file.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.action == 'ready_for_review' ||
+      github.event.label.name == 'ci:full' ||
+      ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+       github.event.pull_request.draft == false)
+    name: py${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      # Preserve the complete compatibility report; one platform failure must
+      # not cancel the other observations.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package with dev extras
+        # The dev extra pulls in pytest, ruff, build and hatchling. Installing
+        # build + hatchling keeps the wheel/sdist package-asset tests live.
+        run: python -m pip install -e ".[dev]"
+
+      - name: Lint once on the canonical toolchain
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: python -m ruff check .
+
+      - name: Test (pytest)
+        run: python -m pytest
+
+  full-candidate:
+    name: full candidate
+    needs: test
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+       github.event.action == 'ready_for_review' ||
+       github.event.label.name == 'ci:full' ||
+       ((github.event.action == 'opened' || github.event.action == 'reopened') &&
+        github.event.pull_request.draft == false))
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every matrix cell
+        env:
+          MATRIX_RESULT: ${{ needs.test.result }}
+        run: |
+          if [ "$MATRIX_RESULT" != success ]; then
+            echo "The cross-platform candidate matrix concluded: $MATRIX_RESULT" >&2
+            exit 1
+          fi
+          echo "All 12 Python/OS candidate cells passed."
