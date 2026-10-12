@@ -285,3 +285,48 @@ def test_lint_flags_resume_mechanics(item):
 )
 def test_lint_allows_productive_actions(item):
     assert lint_first_next_action(item) is None
+
+
+# --------------------------------------------------------------------------- #
+# Issue #142: a DONE close clears first_next_action; validate must accept it
+# --------------------------------------------------------------------------- #
+
+
+def _close(repo: Path, status: str) -> int:
+    return main(["close", "--repo-root", str(repo), "--status", status])
+
+
+def _blank_first_next_action(hist: Path) -> None:
+    index_path = hist / "INDEX.yaml"
+    index = parse_mapping(index_path.read_text(encoding="utf-8"))
+    index["first_next_action"] = ""
+    index_path.write_text(dump_mapping(index) + "\n", encoding="utf-8")
+
+
+def test_validate_accepts_empty_first_next_action_after_done_close(tmp_path, capsys):
+    hist = _build_history(tmp_path)
+    assert _close(tmp_path, "DONE") == 0
+    index = parse_mapping((hist / "INDEX.yaml").read_text(encoding="utf-8"))
+    assert index["first_next_action"] == ""  # the state glue close documents
+
+    assert _validate(tmp_path) == 0
+    assert "OK" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("status", ["BLOCKED", "ABANDONED"])
+def test_validate_still_passes_after_blocked_or_abandoned_close(tmp_path, status):
+    _build_history(tmp_path)
+    assert _close(tmp_path, status) == 0
+    assert _validate(tmp_path) == 0
+
+
+@pytest.mark.parametrize("closed_as", [None, "BLOCKED", "ABANDONED"])
+def test_validate_rejects_empty_first_next_action_unless_done(tmp_path, capsys, closed_as):
+    hist = _build_history(tmp_path)
+    if closed_as is not None:
+        assert _close(tmp_path, closed_as) == 0
+    _blank_first_next_action(hist)
+
+    assert _validate(tmp_path) == 1
+    err = capsys.readouterr().err
+    assert "INDEX.yaml.first_next_action ('') does not match" in err

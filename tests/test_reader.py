@@ -247,3 +247,16 @@ def test_status_and_resume_prompt_are_read_only(tmp_path):
     main(["status", "--repo-root", str(tmp_path)])
     main(["resume-prompt", "--repo-root", str(tmp_path)])
     assert _snapshot(hist) == before
+
+
+def test_status_prints_none_for_first_next_action_after_done_close(tmp_path, capsys):
+    """Issue #142: a DONE close clears the next action; say so instead of (unknown)."""
+    _build_history(tmp_path)
+    assert main(["close", "--repo-root", str(tmp_path), "--status", "DONE"]) == 0
+
+    assert main(["status", "--repo-root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "first next action: none (session DONE)" in out
+    assert "(unknown)" not in out
+    assert "status: DONE" in out
+    assert "validation: OK" in out
