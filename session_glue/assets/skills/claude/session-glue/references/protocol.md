@@ -20,9 +20,13 @@ Never write outside `.agent-history/`. Refuse to follow symlinks that would
 redirect these writes outside the repository.
 
 `DECISIONS.md` is an append-only log of durable decisions. Add an optional `decisions:`
-list to the frontmatter (scalars — decisions made this session); `glue create` appends
-one line per entry and never rewrites existing lines. On resume, after reading
-`LATEST.md`, also read `DECISIONS.md` if present — one line per decision, cheap to scan.
+list to the frontmatter (scalars: decisions made this session); `glue create` appends
+one line per entry and never rewrites existing lines. Prefix a standing operator ruling
+with `[standing]` (for example: no independent review unless asked, a tool exclusion, a
+design freeze); give a one-off decision its PR or issue number so it is not read as
+precedent later. On resume, after reading `LATEST.md`, also read `DECISIONS.md` if
+present: its last 20 lines plus every line containing `[standing]`. The file is
+append-only and grows, so do not read it whole by default.
 
 `supersedes` is an optional frontmatter scalar naming the prior `session_id` this handoff
 replaces; when a handoff continues or replaces an earlier session, record it (when present
@@ -150,7 +154,8 @@ handoff and its applicable instructions. Load only reference sections needed for
 the current decision. If required context is unavailable or contradictory,
 resolve that boundary before dependent work; do not paste entire manuals or raw
 transcripts into every handoff. Carry only live constraints and useful decisions,
-with links to detailed evidence. Checkpoint at a meaningful continuity boundary,
+with links to detailed evidence; keep standing operator rulings separate from
+one-off decisions (see DECISIONS.md above). Checkpoint at a meaningful continuity boundary,
 not every implementation step or review fix.
 
 ## RESUME_PROMPT.txt

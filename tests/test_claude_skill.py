@@ -70,3 +70,28 @@ def test_claude_skill_documents_explicit_vault_resume():
     assert "glue sync pull --repo-root . --project-id <id> --vault-git-dir <path>" in FLAT_SKILL
     assert "do not authenticate or handle a" in FLAT_SKILL
     assert "vault not fully available" in FLAT_SKILL
+
+
+def test_claude_skill_carries_and_reads_standing_decisions():
+    """Issue #140 (PR #141): the skill text is the only carrier of the convention.
+
+    ``glue create`` appends one ``DECISIONS.md`` line per ``decisions:`` entry and
+    nothing parses ``[standing]`` yet, so the skill must say both halves: write a
+    standing ruling with the prefix, and read it back on resume with the same
+    bounded rule as ``references/protocol.md`` (last 20 lines plus every
+    ``[standing]`` line).
+    """
+    protocol = assets.skill_dir("claude").joinpath("references", "protocol.md")
+    flat_protocol = " ".join(protocol.read_text(encoding="utf-8").split())
+
+    assert "DECISIONS.md" in SKILL
+    assert "[standing]" in SKILL
+    assert "`decisions:` frontmatter list with a `[standing]` prefix" in FLAT_SKILL
+    assert "give a one-off decision its PR or issue number" in FLAT_SKILL
+    assert "read its last 20 lines and every line containing `[standing]`" in FLAT_SKILL
+    assert "a standing operator ruling stays in force until the operator changes it" in FLAT_SKILL
+
+    assert "DECISIONS.md" in flat_protocol
+    assert "Prefix a standing operator ruling with `[standing]`" in flat_protocol
+    assert "its last 20 lines plus every line containing `[standing]`" in flat_protocol
+    assert "do not read it whole by default" in flat_protocol
