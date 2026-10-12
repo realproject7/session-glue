@@ -9,7 +9,7 @@ Releases are built and published from CI going forward.
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-08-29
+## [0.4.0] - 2026-10-12
 
 ### Added
 
@@ -52,6 +52,13 @@ Releases are built and published from CI going forward.
   never creates a vault, authenticates, retries, or synchronizes on its own initiative.
 
 ### Changed
+
+- Codex and Claude skills carry standing operator rulings across sessions. On glue, a
+  standing ruling goes into the `decisions:` list with a `[standing]` prefix so it reaches
+  `DECISIONS.md`, and a one-off decision carries its PR or issue number instead. On resume,
+  the skills read the last 20 lines of `DECISIONS.md` plus every `[standing]` line, and a
+  standing ruling stays in force until the operator changes it. No schema, CLI, validator
+  or prompt-generation change (#140, #141).
 
 - Codex and Claude skills preserve compact outcome, role, authority and gate context on resume. They check current index lifecycle and git drift, reconcile applicable instructions and load references only for the current decision. README distinguishes visible context from cached/billed tokens and recommends meaningful continuity checkpoints. No schema, CLI, installer or vault behavior changed.
 
