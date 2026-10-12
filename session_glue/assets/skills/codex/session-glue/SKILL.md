@@ -22,7 +22,11 @@ session:
    goal and acceptance, role/ownership, preserved authorization and holds,
    branch/HEAD and working changes, relevant evidence and next productive work.
    Give context-file references a reason; do not paste whole manuals/transcripts
-   or add unsupported frontmatter. Read the Handoff Markdown section of
+   or add unsupported frontmatter.
+   Put standing operator rulings (for example: no independent review unless asked,
+   a tool exclusion, a design freeze) in the `decisions:` frontmatter list with a
+   `[standing]` prefix so they reach `DECISIONS.md`; give a one-off decision its PR
+   or issue number so it is not read as precedent later. Read the Handoff Markdown section of
    `references/protocol.md` when the format is not already known.
 3. Prefer the installed CLI:
 
@@ -43,7 +47,9 @@ database, or an external service.
 
 When the operator asks to resume or pastes a Session Glue resume prompt:
 
-1. Read `.agent-history/LATEST.md` first. Check current lifecycle with
+1. Read `.agent-history/LATEST.md` first. If `.agent-history/DECISIONS.md` exists,
+   read its last 20 lines and every line containing `[standing]`; a standing operator
+   ruling stays in force until the operator changes it. Check current lifecycle with
    `glue status --repo-root .` (or INDEX.yaml if the CLI is unavailable), because
    closing a session updates the index without rewriting the handoff. Preserve
    operator pauses and gates; a resume prompt does not clear them.
