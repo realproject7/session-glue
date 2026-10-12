@@ -20,6 +20,7 @@ implemented; this is the schema/fixture foundation only.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field, fields
 from typing import Any
 
@@ -585,14 +586,54 @@ def build_index_entry(handoff: Handoff) -> dict[str, Any]:
     }
 
 
-def build_resume_prompt(handoff: Handoff) -> str:
+#: Marker that makes a ``DECISIONS.md`` line a standing operator ruling (#140).
+#: Plain text: nothing in the schema parses it, ``glue create`` stores it verbatim.
+STANDING_MARKER = "[standing]"
+#: ``glue status`` and the resume prompt show at most this many standing lines.
+STANDING_LIMIT = 20
+
+
+def standing_lines(decisions_text: str | None) -> list[str]:
+    """Every ``DECISIONS.md`` line containing ``[standing]``, in file order.
+
+    The log is append-only (and the vault merge sorts it by session date), so
+    file order is oldest first, newest last.
+    """
+    if not decisions_text:
+        return []
+    return [line.strip() for line in decisions_text.splitlines() if STANDING_MARKER in line]
+
+
+def render_standing(lines: Sequence[str], limit: int = STANDING_LIMIT) -> list[str]:
+    """The displayed standing block: the newest ``limit`` lines, oldest first.
+
+    When more exist, one ``(+N older standing lines in DECISIONS.md)`` line comes
+    first, so the reader knows the file holds more. Empty in, empty out.
+    """
+    shown = list(lines)[-limit:] if limit > 0 else []
+    older = len(lines) - len(shown)
+    block = [f"(+{older} older standing lines in DECISIONS.md)"] if older else []
+    return block + shown
+
+
+def build_resume_prompt(handoff: Handoff, standing: Sequence[str] = ()) -> str:
     """Generate the ``RESUME_PROMPT.txt`` body for a handoff.
 
     The prompt points the next session at ``.agent-history/LATEST.md`` and tells
-    it to continue from the first ``next_todo_items`` entry.
+    it to continue from the first ``next_todo_items`` entry. ``standing`` holds
+    the ``[standing]`` lines of ``DECISIONS.md`` (see :func:`standing_lines`);
+    when non-empty they follow the first action under ``Standing operator
+    rulings:``, capped by :func:`render_standing`. Without them the prompt is
+    byte-identical to the one 0.4.0 generated.
     """
     project_root = handoff.project_root or "(unknown)"
     first_action = handoff.first_next_action or "(no next action recorded)"
+    block = render_standing(standing)
+    standing_text = (
+        "Standing operator rulings:\n" + "".join(f"{line}\n" for line in block) + "\n"
+        if block
+        else ""
+    )
     return (
         "Continue the previous coding session.\n"
         "\n"
@@ -605,6 +646,7 @@ def build_resume_prompt(handoff: Handoff) -> str:
         "First productive next action (next_todo_items[0]):\n"
         f"{first_action}\n"
         "\n"
+        f"{standing_text}"
         "Before editing, run git status --short and report any drift from the "
         "handoff.\n"
         "Do not scan the whole repository unless the handoff is stale or "

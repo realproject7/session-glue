@@ -369,7 +369,7 @@ glue create --no-exclude    # write handoffs but leave git-ignore state untouche
 ```bash
 glue create --input handoff.md   # archive a handoff (validates first; stdin supported)
 glue validate [--sessions] [--git]   # check .agent-history/ consistency (+ optional git drift)
-glue status [--git]              # compact orientation: latest session, next action, counts
+glue status [--git]              # compact orientation: latest session, next action, counts, standing rulings
 glue resume-prompt               # print the exact resume prompt
 glue close --status DONE         # set a session's lifecycle status (INDEX-only; archives stay immutable)
 

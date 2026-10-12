@@ -883,9 +883,16 @@ def merge_lifecycle(
 
 
 def rebuild_derived(
-    archives: dict[str, str], head_session_id: str, lifecycle: list[dict[str, Any]]
+    archives: dict[str, str],
+    head_session_id: str,
+    lifecycle: list[dict[str, Any]],
+    decisions: str = "",
 ) -> dict[str, str]:
     """Rebuild ``LATEST.md``, ``INDEX.yaml`` and ``RESUME_PROMPT.txt``.
+
+    ``decisions`` is the ``DECISIONS.md`` text that lands alongside the views, so
+    the rebuilt prompt carries the same ``[standing]`` lines ``glue create``
+    would have written (#140). Empty means no standing block.
 
     ``archives`` maps ``sessions/<name>.md`` to the *materialized* document text,
     and must already be the union of imported and pre-existing local archives —
@@ -895,7 +902,13 @@ def rebuild_derived(
     ``LATEST.md`` is a byte copy of the head archive rather than a re-render, so
     an unknown frontmatter field survives there as well as in ``sessions/``.
     """
-    from .schema import Handoff, build_index_entry, build_resume_prompt, join_search_tags
+    from .schema import (
+        Handoff,
+        build_index_entry,
+        build_resume_prompt,
+        join_search_tags,
+        standing_lines,
+    )
 
     if not archives:
         raise VaultError("cannot rebuild derived views from an empty archive set")
@@ -946,7 +959,7 @@ def rebuild_derived(
     return {
         "LATEST.md": archives[head_path],
         "INDEX.yaml": dump_mapping(index) + "\n",
-        "RESUME_PROMPT.txt": build_resume_prompt(head),
+        "RESUME_PROMPT.txt": build_resume_prompt(head, standing_lines(decisions)),
     }
 
 
@@ -1131,7 +1144,10 @@ def migrate_roots(repo_root: Path | str, session_id: str, project_root: Path | s
     write = LocalWrite(history_dir)
     write.stage(target, rewritten)
     for name, text in rebuild_derived(
-        archives, _head_session_id(root, archives), state.get("lifecycle", [])
+        archives,
+        _head_session_id(root, archives),
+        state.get("lifecycle", []),
+        _read_text(root, _local_decisions_path(root)),
     ).items():
         write.stage(name, text)
     write.commit()
@@ -2168,12 +2184,11 @@ def import_project(
     union.update(materialized)
 
     head = vault_state.get("head_session_id") or ""
-    derived = rebuild_derived(union, head, merged_lifecycle)
-
     decisions = merge_decisions(
         _read_text(root, _local_decisions_path(root)),
         read_vault_decisions(namespace, admitted),
     )
+    derived = rebuild_derived(union, head, merged_lifecycle, decisions)
 
     _materialize_local(root, materialized, derived, decisions, ledger)
 
@@ -2503,7 +2518,7 @@ def resolve_project(
         _materialize_local(
             root,
             local_active,
-            rebuild_derived(local_active, head_session, merged_lifecycle),
+            rebuild_derived(local_active, head_session, merged_lifecycle, decisions),
             decisions,
         )
 

@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+import session_glue
 from session_glue import cli, vaultgit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -122,7 +123,7 @@ def test_changelog_cuts_0_4_0_below_an_empty_unreleased():
     heading = re.search(r"^## \[0\.4\.0\] - \d{4}-\d{2}-\d{2}$", CHANGELOG, re.MULTILINE)
     assert heading, "the changelog was never cut (no dated [0.4.0] heading)"
 
-    unreleased = CHANGELOG.split("## [Unreleased]", 1)[1].split("## [0.4.0]", 1)[0]
+    unreleased = CHANGELOG.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
     release = CHANGELOG[heading.end() :].split("## [0.3.1]", 1)[0]
 
     assert unreleased.strip() == "", "the Unreleased section must be literally empty"
@@ -131,6 +132,34 @@ def test_changelog_cuts_0_4_0_below_an_empty_unreleased():
     assert "(#142)" in release, "the #142 validate fix ships in 0.4.0"
     assert CHANGELOG.index("## [Unreleased]") < heading.start(), (
         "[Unreleased] must come above the dated 0.4.0 section"
+    )
+
+
+def _release_section(version: str) -> str:
+    """One dated release section, ending at the next heading (any ISO date)."""
+    pattern = rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$"
+    heading = re.search(pattern, CHANGELOG, re.MULTILINE)
+    assert heading, f"the changelog was never cut (no dated [{version}] heading)"
+    return CHANGELOG[heading.end() :].split("\n## [", 1)[0]
+
+
+def test_changelog_cuts_0_4_1_with_the_standing_output():
+    """#140's CLI half ships as 0.4.1: Added for the output, Changed for the skills."""
+    release = _release_section("0.4.1")
+    added = release.split("### Added", 1)[1].split("\n### ", 1)[0]
+    changed = release.split("### Changed", 1)[1].split("\n### ", 1)[0]
+    assert "`standing:`" in added and "Standing operator rulings:" in added
+    assert "(+N older standing lines in DECISIONS.md)" in added
+    assert "(#140)" in added
+    assert "fallback for older CLIs" in changed
+    assert "Personal Vault" not in release, "0.4.0 notes must stay in their own section"
+
+
+def test_newest_changelog_release_matches_the_package_version():
+    newest = re.search(r"^## \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}$", CHANGELOG, re.MULTILINE)
+    assert newest, "no dated release heading"
+    assert newest.group(1) == session_glue.__version__, (
+        "bump __version__ and cut the CHANGELOG section together"
     )
 
 
