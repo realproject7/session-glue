@@ -46,9 +46,11 @@ def _validate_index(index_path: Path, latest: Handoff | None) -> list[str]:
     """Validate ``INDEX.yaml`` and its consistency with ``LATEST.md`` and disk.
 
     Cross-file checks (issue #36): ``first_next_action`` and ``latest_session``
-    must agree with ``LATEST.md``; ``latest_file`` and every ``sessions[]`` entry
-    file must exist on disk. Index paths are relative to ``.agent-history/`` (the
-    directory that holds ``INDEX.yaml``).
+    must agree with ``LATEST.md`` (an empty ``first_next_action`` is accepted
+    only when the ``latest_session`` entry is ``DONE``, issue #142);
+    ``latest_file`` and every ``sessions[]`` entry file must exist on disk.
+    Index paths are relative to ``.agent-history/`` (the directory that holds
+    ``INDEX.yaml``).
     """
     if not index_path.is_file():
         return [f"missing {INDEX_FILENAME}"]
@@ -63,7 +65,11 @@ def _validate_index(index_path: Path, latest: Handoff | None) -> list[str]:
     if latest is not None:
         index_action = index.get("first_next_action")
         latest_action = latest.first_next_action
-        if index_action != latest_action:
+        # Issue #142: ``glue close --status DONE`` clears the top-level value
+        # while LATEST.md stays immutable, so an empty value is the documented
+        # state of a DONE latest session rather than a mismatch.
+        done_latest = index_action == "" and _latest_session_is_done(index)
+        if index_action != latest_action and not done_latest:
             problems.append(
                 f"{INDEX_FILENAME}.first_next_action ({index_action!r}) does not match "
                 f"{LATEST_FILENAME} next_todo_items[0] ({latest_action!r})"
@@ -90,6 +96,22 @@ def _validate_index(index_path: Path, latest: Handoff | None) -> list[str]:
 
     problems.extend(_validate_index_sessions(index.get("sessions"), history))
     return problems
+
+
+def _latest_session_is_done(index: dict) -> bool:
+    """True when the ``sessions[]`` entry named by ``latest_session`` is ``DONE``.
+
+    Only that exact entry counts: ``BLOCKED`` and ``ABANDONED`` keep their next
+    action, and an ``in_progress`` session with an empty value stays a problem.
+    """
+    sessions = index.get("sessions")
+    if not isinstance(sessions, list):
+        return False
+    latest = index.get("latest_session")
+    for entry in sessions:
+        if isinstance(entry, dict) and entry.get("session_id") == latest:
+            return entry.get("status") == "DONE"
+    return False
 
 
 def _history_relative_path(history: Path, value: str) -> Path | None:

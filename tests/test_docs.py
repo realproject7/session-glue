@@ -118,17 +118,27 @@ def test_changelog_cuts_0_4_0_below_an_empty_unreleased():
     name stated. A section test whose slice does not stop at the next heading
     stops discriminating the moment a section is inserted.
     """
-    assert "## [0.4.0] - 2026-10-12" in CHANGELOG, "the changelog was never cut"
+    # Any ISO date: the date is set at tag time without a test change.
+    heading = re.search(r"^## \[0\.4\.0\] - \d{4}-\d{2}-\d{2}$", CHANGELOG, re.MULTILINE)
+    assert heading, "the changelog was never cut (no dated [0.4.0] heading)"
 
     unreleased = CHANGELOG.split("## [Unreleased]", 1)[1].split("## [0.4.0]", 1)[0]
-    release = CHANGELOG.split("## [0.4.0] - 2026-10-12", 1)[1].split("## [0.3.1]", 1)[0]
+    release = CHANGELOG[heading.end() :].split("## [0.3.1]", 1)[0]
 
     assert unreleased.strip() == "", "the Unreleased section must be literally empty"
     assert "Personal Vault" in release, "the vault notes belong to the 0.4.0 release"
     assert "[standing]" in release, "the #141 skill notes belong to the unshipped 0.4.0 release"
-    assert CHANGELOG.index("## [Unreleased]") < CHANGELOG.index(
-        "## [0.4.0] - 2026-10-12"
-    ), "[Unreleased] must come above the dated 0.4.0 section"
+    assert "(#142)" in release, "the #142 validate fix ships in 0.4.0"
+    assert CHANGELOG.index("## [Unreleased]") < heading.start(), (
+        "[Unreleased] must come above the dated 0.4.0 section"
+    )
+
+
+def test_changelog_states_the_manual_release_cut():
+    """Operator decision 2026-10-12: releases are cut by hand, not from CI."""
+    assert "published from CI" not in CHANGELOG
+    assert "a lightweight tag vX.Y.Z on the landed commit" in CHANGELOG
+    assert "the operator uploads the" in CHANGELOG
 
 
 # --------------------------------------------------------------------------- #

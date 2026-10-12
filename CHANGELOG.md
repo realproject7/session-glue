@@ -5,7 +5,9 @@ All notable changes to Session Glue are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Releases are built and published from CI going forward.
+Releases are cut from main: a lightweight tag vX.Y.Z on the landed commit, a GitHub
+release whose notes are that version's CHANGELOG section, then the operator uploads the
+built sdist and wheel with twine.
 
 ## [Unreleased]
 
@@ -74,6 +76,14 @@ Releases are built and published from CI going forward.
   ever requested, read, parsed, or stored.
 - One `--project-id` per checkout is enforced before any write, and both README and CLI
   help say so: there is no relink workflow and no second baseline in v1.
+
+### Fixed
+
+- `glue validate` accepts an empty top-level `first_next_action` in `INDEX.yaml` when the
+  `latest_session` entry's status is `DONE`, which is the state `glue close --status DONE`
+  produces and documents. `BLOCKED` and `ABANDONED` keep their next action, and an
+  `in_progress` session with an empty value is still reported. `glue status` prints
+  `first next action: none (session DONE)` for that case instead of `(unknown)` (#142).
 
 ## [0.3.1] - 2026-07-10
 

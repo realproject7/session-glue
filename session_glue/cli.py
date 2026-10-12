@@ -1021,13 +1021,15 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
     print(".agent-history: present")
     index = status.index or {}
+    # Lifecycle status of the latest session (INDEX-only: the writer keeps
+    # per-session status inside sessions[]; no narrative read).
+    lifecycle = reader.latest_status(index)
     for label, key in reader.STATUS_FIELDS:
         value = index.get(key)
+        if key == "first_next_action" and value in (None, "") and lifecycle == "DONE":
+            value = "none (session DONE)"  # a DONE close clears it (#142)
         print(f"{label}: {value if value not in (None, '') else '(unknown)'}")
 
-    # Lifecycle status of the latest session + a session count — both INDEX-only
-    # (the writer keeps per-session status inside sessions[]; no narrative read).
-    lifecycle = reader.latest_status(index)
     print(f"status: {lifecycle if lifecycle not in (None, '') else '(unknown)'}")
     print(f"sessions: {reader.session_count(index)}")
     # Cheap file-line count of the append-only decisions log (0 when absent).
