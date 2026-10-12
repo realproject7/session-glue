@@ -124,3 +124,31 @@ def test_skill_documents_explicit_vault_resume():
     assert "glue sync pull --repo-root . --project-id <id> --vault-dir <path>" in FLAT_SKILL
     assert "glue sync pull --repo-root . --project-id <id> --vault-git-dir <path>" in FLAT_SKILL
     assert "do not retry a failure, poll, or sync automatically" in FLAT_SKILL
+
+
+# --------------------------------------------------------------------------- #
+# Standing decisions (issue #140, PR #141)
+# --------------------------------------------------------------------------- #
+
+
+def test_skill_carries_and_reads_standing_decisions():
+    # Glue: a standing ruling goes into decisions: with the prefix; a one-off
+    # decision carries its PR or issue number instead.
+    assert "DECISIONS.md" in SKILL
+    assert "[standing]" in SKILL
+    assert "`decisions:` frontmatter list with a `[standing]` prefix" in FLAT_SKILL
+    assert "give a one-off decision its PR or issue number" in FLAT_SKILL
+    # Resume: the bounded read rule must stay in step with references/protocol.md.
+    assert "read its last 20 lines and every line containing `[standing]`" in FLAT_SKILL
+    assert "a standing operator ruling stays in force until the operator changes it" in FLAT_SKILL
+
+
+def test_protocol_defines_standing_decisions_and_bounded_read():
+    # glue create appends one DECISIONS.md line per entry; [standing] is plain
+    # text that nothing parses yet, so the protocol has to spell the rule out.
+    assert "DECISIONS.md" in PROTOCOL
+    assert "Prefix a standing operator ruling with `[standing]`" in FLAT_PROTOCOL
+    assert "give a one-off decision its PR or issue number" in FLAT_PROTOCOL
+    assert "its last 20 lines plus every line containing `[standing]`" in FLAT_PROTOCOL
+    assert "do not read it whole by default" in FLAT_PROTOCOL
+    assert "keep standing operator rulings separate from one-off decisions" in FLAT_PROTOCOL
