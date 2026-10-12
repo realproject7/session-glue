@@ -34,6 +34,7 @@ from .schema import (
     HandoffParseError,
     lint_first_next_action,
     parse_frontmatter,
+    render_standing,
 )
 
 
@@ -1040,6 +1041,14 @@ def _cmd_status(args: argparse.Namespace) -> int:
     prior = reader.latest_supersedes(index)
     if prior is not None:
         print(f"lineage: {index.get('latest_session')} <- supersedes {prior}")
+
+    # Standing operator rulings from DECISIONS.md (#140), oldest first and capped
+    # at the newest STANDING_LIMIT. Silent when the log is absent or has none.
+    standing = render_standing(reader.standing_decisions(Path(args.repo_root)))
+    if standing:
+        print("standing:")
+        for line in standing:
+            print(f"  {line}")
 
     if status.problems:
         print(f"validation: {len(status.problems)} problem(s)")

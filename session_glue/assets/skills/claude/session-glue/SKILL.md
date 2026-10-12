@@ -49,11 +49,14 @@ database, or an external service.
 
 When the operator asks to resume or pastes a Session Glue resume prompt:
 
-1. Read `.agent-history/LATEST.md` first. If `.agent-history/DECISIONS.md` exists,
-   read its last 20 lines and every line containing `[standing]`; a standing operator
-   ruling stays in force until the operator changes it. Check current lifecycle with
+1. Read `.agent-history/LATEST.md` first. Check current lifecycle with
    `glue status --repo-root .` (or INDEX.yaml if the CLI is unavailable), because
-   closing a session updates the index without rewriting the handoff. Preserve
+   closing a session updates the index without rewriting the handoff. With CLI
+   0.4.1 or newer (`glue --version`), `glue status` and the resume prompt print the
+   `[standing]` lines of `.agent-history/DECISIONS.md` (the newest 20, plus a count
+   of older ones to read in the file). With an older CLI or none, read the last 20
+   lines of `DECISIONS.md` plus every line containing `[standing]` yourself; a
+   standing operator ruling stays in force until the operator changes it. Preserve
    operator pauses and gates; a resume prompt does not clear them.
 2. Check branch, HEAD and `git status --short`; report material drift.
 3. Reconcile the handoff with current applicable agent/repo/runtime instructions

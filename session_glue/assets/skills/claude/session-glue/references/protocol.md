@@ -24,9 +24,13 @@ list to the frontmatter (scalars: decisions made this session); `glue create` ap
 one line per entry and never rewrites existing lines. Prefix a standing operator ruling
 with `[standing]` (for example: no independent review unless asked, a tool exclusion, a
 design freeze); give a one-off decision its PR or issue number so it is not read as
-precedent later. On resume, after reading `LATEST.md`, also read `DECISIONS.md` if
-present: its last 20 lines plus every line containing `[standing]`. The file is
-append-only and grows, so do not read it whole by default.
+precedent later. With CLI 0.4.1 or newer, `glue status` prints a `standing:` block and
+the resume prompt a `Standing operator rulings:` block with every line containing
+`[standing]`, oldest first and capped at the newest 20, led by a
+`(+N older standing lines in DECISIONS.md)` line when more exist. With an older CLI, or
+on the fallback path, read `DECISIONS.md` after `LATEST.md` yourself: its last 20 lines
+plus every line containing `[standing]`. The file is append-only and grows, so do not
+read it whole by default.
 
 `supersedes` is an optional frontmatter scalar naming the prior `session_id` this handoff
 replaces; when a handoff continues or replaces an earlier session, record it (when present
@@ -173,9 +177,16 @@ Then follow the Resume Prompt and continue from the first next_todo_items entry.
 First productive next action (next_todo_items[0]):
 <next_todo_items[0]>
 
+Standing operator rulings:
+<each DECISIONS.md line containing [standing], newest 20, oldest first>
+
 Before editing, run git status --short and report any drift from the handoff.
 Do not scan the whole repository unless the handoff is stale or insufficient.
 ```
+
+Omit the `Standing operator rulings:` block and its blank line when `DECISIONS.md` is
+absent or has no `[standing]` line. When more than 20 exist, put
+`(+N older standing lines in DECISIONS.md)` first in the block.
 
 After writing the files, print the exact prompt in a fenced code block.
 

@@ -138,17 +138,36 @@ def test_skill_carries_and_reads_standing_decisions():
     assert "[standing]" in SKILL
     assert "`decisions:` frontmatter list with a `[standing]` prefix" in FLAT_SKILL
     assert "give a one-off decision its PR or issue number" in FLAT_SKILL
-    # Resume: the bounded read rule must stay in step with references/protocol.md.
-    assert "read its last 20 lines and every line containing `[standing]`" in FLAT_SKILL
+    # Resume: CLI 0.4.1+ prints them; older CLIs keep the bounded manual read,
+    # in step with references/protocol.md.
+    assert (
+        "With CLI 0.4.1 or newer (`glue --version`), `glue status` and the resume prompt "
+        "print the `[standing]` lines of `.agent-history/DECISIONS.md`"
+    ) in FLAT_SKILL
+    assert (
+        "With an older CLI or none, read the last 20 lines of `DECISIONS.md` plus every "
+        "line containing `[standing]` yourself"
+    ) in FLAT_SKILL
     assert "a standing operator ruling stays in force until the operator changes it" in FLAT_SKILL
 
 
 def test_protocol_defines_standing_decisions_and_bounded_read():
     # glue create appends one DECISIONS.md line per entry; [standing] is plain
-    # text that nothing parses yet, so the protocol has to spell the rule out.
+    # text, so the protocol spells out both the CLI output and the manual read.
     assert "DECISIONS.md" in PROTOCOL
     assert "Prefix a standing operator ruling with `[standing]`" in FLAT_PROTOCOL
     assert "give a one-off decision its PR or issue number" in FLAT_PROTOCOL
+    assert "With CLI 0.4.1 or newer, `glue status` prints a `standing:` block" in FLAT_PROTOCOL
+    assert "the resume prompt a `Standing operator rulings:` block" in FLAT_PROTOCOL
+    assert "(+N older standing lines in DECISIONS.md)" in FLAT_PROTOCOL
     assert "its last 20 lines plus every line containing `[standing]`" in FLAT_PROTOCOL
     assert "do not read it whole by default" in FLAT_PROTOCOL
     assert "keep standing operator rulings separate from one-off decisions" in FLAT_PROTOCOL
+
+
+def test_protocol_prompt_template_carries_the_standing_block():
+    # The fallback writer must produce the same prompt shape as glue create.
+    template = PROTOCOL.split("## RESUME_PROMPT.txt", 1)[1].split("\n## ", 1)[0]
+    assert template.index("<next_todo_items[0]>") < template.index("Standing operator rulings:")
+    assert template.index("Standing operator rulings:") < template.index("Before editing")
+    assert "Omit the `Standing operator rulings:` block" in _flat(template)

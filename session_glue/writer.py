@@ -27,6 +27,7 @@ from .schema import (
     join_search_tags,
     parse_frontmatter,
     parse_mapping,
+    standing_lines,
 )
 
 AGENT_HISTORY_DIRNAME = ".agent-history"
@@ -226,6 +227,24 @@ def _decision_line(handoff: Handoff, decision: object) -> str:
     return f"- [{handoff.session_date}][{handoff.session_id}] {decision}"
 
 
+def read_standing_lines(decisions_path: Path) -> list[str]:
+    """The ``[standing]`` lines of ``decisions_path``, oldest first (#140).
+
+    Fail-quiet, because the callers only display these lines: a missing,
+    symlinked, unreadable or non-UTF-8 log yields no lines rather than an error.
+    A symlink is refused like every other ``.agent-history/`` path, so a
+    redirected log cannot leak outside content into ``glue status`` or the
+    resume prompt.
+    """
+    if decisions_path.is_symlink() or not decisions_path.is_file():
+        return []
+    try:
+        text = decisions_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    return standing_lines(text)
+
+
 def append_decisions(decisions_path: Path, handoff: Handoff) -> bool:
     """Append this session's ``decisions`` to the append-only DECISIONS.md log.
 
@@ -304,7 +323,6 @@ def create_handoff(
 
     archive_path.write_text(document, encoding="utf-8")
     latest_path.write_text(document, encoding="utf-8")
-    resume_path.write_text(build_resume_prompt(handoff), encoding="utf-8")
 
     existing_index: dict | None = None
     if index_path.exists():
@@ -318,13 +336,20 @@ def create_handoff(
     index_path.write_text(dump_mapping(index) + "\n", encoding="utf-8")
 
     # Append-only decisions log (side output). Only created once a session
-    # records a decision; deduped so a re-freeze never duplicates lines.
+    # records a decision; deduped so a re-freeze never duplicates lines. It is
+    # written before the resume prompt so the prompt carries this session's
+    # [standing] rulings as well as earlier ones (#140).
+    has_decisions = append_decisions(decisions_path, handoff)
+    resume_path.write_text(
+        build_resume_prompt(handoff, read_standing_lines(decisions_path)), encoding="utf-8"
+    )
+
     written = {
         "archive": archive_path,
         "latest": latest_path,
         "resume_prompt": resume_path,
         "index": index_path,
     }
-    if append_decisions(decisions_path, handoff):
+    if has_decisions:
         written["decisions"] = decisions_path
     return written

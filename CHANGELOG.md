@@ -11,6 +11,26 @@ built sdist and wheel with twine.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-13
+
+### Added
+
+- `glue status` prints a `standing:` block after the lineage line with every `DECISIONS.md`
+  line containing `[standing]`, oldest first and capped at the newest 20, led by a
+  `(+N older standing lines in DECISIONS.md)` line when more exist. `glue resume-prompt` and
+  the generated `RESUME_PROMPT.txt` carry the same lines under `Standing operator rulings:`
+  after the first productive next action, including the prompt that `glue sync pull`,
+  `resolve` and `migrate-roots` rebuild. Nothing extra is printed when `DECISIONS.md` is
+  absent or has no such line, so those prompts stay byte-identical to 0.4.0. `decisions:`
+  entries work with or without the prefix; no schema change (#140).
+
+### Changed
+
+- Codex and Claude skills read standing rulings from `glue status` and the resume prompt
+  with CLI 0.4.1 or newer, and keep reading the last 20 lines of `DECISIONS.md` plus every
+  `[standing]` line themselves as the fallback for older CLIs. The fallback prompt template
+  in `references/protocol.md` gains the same block (#140).
+
 ## [0.4.0] - 2026-10-12
 
 ### Added
