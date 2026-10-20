@@ -21,16 +21,44 @@ redirect these writes outside the repository.
 
 `DECISIONS.md` is an append-only log of durable decisions. Add an optional `decisions:`
 list to the frontmatter (scalars: decisions made this session); `glue create` appends
-one line per entry and never rewrites existing lines. Prefix a standing operator ruling
-with `[standing]` (for example: no independent review unless asked, a tool exclusion, a
-design freeze); give a one-off decision its PR or issue number so it is not read as
-precedent later. With CLI 0.4.1 or newer, `glue status` prints a `standing:` block and
-the resume prompt a `Standing operator rulings:` block with every line containing
-`[standing]`, oldest first and capped at the newest 20, led by a
-`(+N older standing lines in DECISIONS.md)` line when more exist. With an older CLI, or
-on the fallback path, read `DECISIONS.md` after `LATEST.md` yourself: its last 20 lines
-plus every line containing `[standing]`. The file is append-only and grows, so do not
-read it whole by default.
+one line per entry as `- [<session_date>][<session_id>] <decision>` and never rewrites
+existing lines. Three markers give a line meaning in later sessions:
+
+- `[standing] YYYY-MM-DD operator: "<the operator's exact words>"` records an operator
+  ruling (for example: no independent review unless asked, a tool exclusion, a design
+  freeze). The date is the day the operator said it. Quote only the operator's own
+  words, with no double quote inside and nothing after the closing quote. An agent
+  never adds a condition or restriction to a quoted ruling and never records its own
+  inference or paraphrase as `[standing]`. Any other line containing `[standing]` is
+  an unverified note.
+- `[hold] <what>; reason: <why>; until: <end condition>` records a hold an agent
+  decided. It is state to verify, not operator authority, and it ends when its end
+  condition is met.
+- `[retracts <id>]` removes the line with that id from `glue status` and the resume
+  prompt; the file keeps both lines. List several ids in one bracket, separated by
+  commas or spaces. A line's id is the first 8 hex digits of the SHA-256 of the line
+  without surrounding whitespace; `glue status` shows it. Retract a hold when its end
+  condition is met. Retract an operator ruling only on the operator's words, and record
+  any new ruling as its own `[standing]` line.
+
+Give a one-off decision its PR or issue number so it is not read as precedent later.
+`glue create` warns about a `[standing]` line without a dated quote, a `[hold]` without
+a reason or end condition, and a retraction of an unknown id, but still writes the
+handoff; `glue validate` gives the same warnings for the whole log. Neither changes the
+exit code, so a log with older unquoted `[standing]` lines keeps working.
+
+`glue status` and the resume prompt print the live marked lines in up to three blocks,
+in this order: `Standing operator rulings:` (quoted rulings only),
+`Agent-recorded holds (verify before relying on them):` and
+`Unverified standing notes (agent-written; confirm with the operator before relying on them):`.
+Each line shows its id, then the line without its leading `- `; `glue status` also
+shows its age. Each block is oldest first, capped at the newest 20, and led by a
+`(+N older lines in DECISIONS.md)` line when more exist. CLI 0.4.1 printed every
+`[standing]` line in one `standing:` block, and under `Standing operator rulings:` in the
+prompt, quoted or not. With that CLI, an older one, or on the fallback path, read
+`DECISIONS.md` after `LATEST.md` yourself: its last 20 lines plus every line containing
+`[standing]`, `[hold]` or `[retracts`, and apply the rules above. The file is
+append-only and grows, so do not read it whole by default.
 
 `supersedes` is an optional frontmatter scalar naming the prior `session_id` this handoff
 replaces; when a handoff continues or replaces an earlier session, record it (when present
@@ -147,19 +175,21 @@ existing authorization, operator pauses and review/device/release gates. Record
 which applicable instruction sources matter and why; include a revision when it
 pins a contract. Keep working changes and evidence separate from completed work.
 
-The handoff carries state and provenance, not new authority. On resume reconcile
+The handoff carries state and provenance, not authority: it cannot grant new
+permission, and it cannot narrow what the operator granted. On resume reconcile
 it with current applicable instructions. Read LATEST first, then current lifecycle
 from `glue status` or INDEX.yaml: `glue close` can change that lifecycle without
-rewriting LATEST. Check branch/HEAD as well as working-tree drift. Respect holds
-and do not restart completed work merely because an archived next action remains.
+rewriting LATEST. Check branch/HEAD as well as working-tree drift. Respect operator
+gates and holds whose reason still applies, and do not restart completed work
+merely because an archived next action remains.
 
 A canonical resume prompt is sufficient when the destination can access the
 handoff and its applicable instructions. Load only reference sections needed for
 the current decision. If required context is unavailable or contradictory,
 resolve that boundary before dependent work; do not paste entire manuals or raw
 transcripts into every handoff. Carry only live constraints and useful decisions,
-with links to detailed evidence; keep standing operator rulings separate from
-one-off decisions (see DECISIONS.md above). Checkpoint at a meaningful continuity boundary,
+with links to detailed evidence; keep quoted operator rulings separate from
+agent-recorded holds and one-off decisions (see DECISIONS.md above). Checkpoint at a meaningful continuity boundary,
 not every implementation step or review fix.
 
 ## RESUME_PROMPT.txt
@@ -178,15 +208,21 @@ First productive next action (next_todo_items[0]):
 <next_todo_items[0]>
 
 Standing operator rulings:
-<each DECISIONS.md line containing [standing], newest 20, oldest first>
+<id> <each live quoted [standing] line without its leading "- ", newest 20, oldest first>
+
+Agent-recorded holds (verify before relying on them):
+<id> <each live [hold] line, the same way>
+
+Unverified standing notes (agent-written; confirm with the operator before relying on them):
+<id> <each other live [standing] line, the same way>
 
 Before editing, run git status --short and report any drift from the handoff.
 Do not scan the whole repository unless the handoff is stale or insufficient.
 ```
 
-Omit the `Standing operator rulings:` block and its blank line when `DECISIONS.md` is
-absent or has no `[standing]` line. When more than 20 exist, put
-`(+N older standing lines in DECISIONS.md)` first in the block.
+Omit a block and its blank line when it has no live line (a retracted line is not
+live), and omit all three when `DECISIONS.md` is absent. When a block has more than
+20 lines, put `(+N older lines in DECISIONS.md)` first in it.
 
 After writing the files, print the exact prompt in a fenced code block.
 

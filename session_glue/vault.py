@@ -891,8 +891,8 @@ def rebuild_derived(
     """Rebuild ``LATEST.md``, ``INDEX.yaml`` and ``RESUME_PROMPT.txt``.
 
     ``decisions`` is the ``DECISIONS.md`` text that lands alongside the views, so
-    the rebuilt prompt carries the same ``[standing]`` lines ``glue create``
-    would have written (#140). Empty means no standing block.
+    the rebuilt prompt carries the same rulings, holds and notes ``glue create``
+    would have written (#140, #146). Empty means no such block.
 
     ``archives`` maps ``sessions/<name>.md`` to the *materialized* document text,
     and must already be the union of imported and pre-existing local archives —
@@ -907,7 +907,6 @@ def rebuild_derived(
         build_index_entry,
         build_resume_prompt,
         join_search_tags,
-        standing_lines,
     )
 
     if not archives:
@@ -959,7 +958,7 @@ def rebuild_derived(
     return {
         "LATEST.md": archives[head_path],
         "INDEX.yaml": dump_mapping(index) + "\n",
-        "RESUME_PROMPT.txt": build_resume_prompt(head, standing_lines(decisions)),
+        "RESUME_PROMPT.txt": build_resume_prompt(head, decisions),
     }
 
 

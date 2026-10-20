@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import (
@@ -33,8 +33,10 @@ from .schema import (
     Handoff,
     HandoffParseError,
     lint_first_next_action,
+    log_warnings,
+    new_decision_warnings,
     parse_frontmatter,
-    render_standing,
+    standing_blocks,
 )
 
 
@@ -901,6 +903,18 @@ def _cmd_create(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
+    # Provenance of standing lines (#146), advisory and fail-open: an unquoted
+    # [standing] is stored but shown as an unverified note, never as an operator
+    # ruling, so the freeze never pushes an agent to invent a quote. Checked
+    # against the pre-write log so a retraction can name an existing id.
+    decisions = handoff.decisions if isinstance(handoff.decisions, list) else []
+    for warning in new_decision_warnings(
+        reader.decisions_text(repo_root),
+        decisions,
+        [writer.decision_line(handoff, decision) for decision in decisions],
+    ):
+        print(f"glue create: WARNING: {warning}", file=sys.stderr)
+
     # Freeze-overuse guard (advisory, fail-open): if the previous LATEST.md was
     # frozen less than 30 minutes before this handoff, warn that the session may
     # not be bloated enough to warrant a fresh freeze. Read the PRIOR LATEST.md
@@ -986,6 +1000,11 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         for warning in leakscan.scan_handoff(latest.read_text(encoding="utf-8"), repo_root):
             print(f"glue validate: WARNING: {warning}", file=sys.stderr)
 
+    # Provenance of standing lines (#146): advisory like the leak warnings, so a
+    # log with legacy unquoted [standing] lines keeps validating.
+    for warning in log_warnings(reader.decisions_text(repo_root)):
+        print(f"glue validate: WARNING: {warning}", file=sys.stderr)
+
     # Opt-in git drift check (advisory only, never flips the exit code). Runs a
     # subprocess only when --git is passed.
     if args.git:
@@ -1042,12 +1061,15 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if prior is not None:
         print(f"lineage: {index.get('latest_session')} <- supersedes {prior}")
 
-    # Standing operator rulings from DECISIONS.md (#140), oldest first and capped
-    # at the newest STANDING_LIMIT. Silent when the log is absent or has none.
-    standing = render_standing(reader.standing_decisions(Path(args.repo_root)))
-    if standing:
-        print("standing:")
-        for line in standing:
+    # Marked DECISIONS.md lines by provenance (#140, #146): quoted operator
+    # rulings, agent-recorded holds, unverified notes. Each line shows its id
+    # (for [retracts <id>]) and age; retracted lines are gone. Each block is
+    # oldest first and capped at the newest STANDING_LIMIT; silent when empty.
+    for label, lines in standing_blocks(
+        reader.decisions_text(Path(args.repo_root)), today=date.today()
+    ):
+        print(label)
+        for line in lines:
             print(f"  {line}")
 
     if status.problems:

@@ -105,8 +105,8 @@ def test_readme_covers_the_scenarios_the_ticket_requires():
     assert not missing, f"README no longer covers: {missing}"
 
 
-def test_changelog_cuts_0_4_0_below_an_empty_unreleased():
-    """The vault notes sit in the dated release, with nothing above it (#134).
+def test_changelog_cuts_0_4_0_below_unreleased():
+    """The vault notes sit in the dated release, below `[Unreleased]` (#134).
 
     Replaces an assertion that `## [0.4.0]` was *absent* — correct while #81 was
     documenting a feature it deliberately did not release, and a prohibition on
@@ -118,15 +118,17 @@ def test_changelog_cuts_0_4_0_below_an_empty_unreleased():
     notes no longer in Unreleased at all, and could not fail for the property its
     name stated. A section test whose slice does not stop at the next heading
     stops discriminating the moment a section is inserted.
+
+    It also asserted that `[Unreleased]` was literally empty: true at the 0.4.0
+    cut, and a prohibition on every later unreleased entry once that cut landed
+    (#146). The 0.4.0 properties stay pinned; the emptiness check is dropped.
     """
     # Any ISO date: the date is set at tag time without a test change.
     heading = re.search(r"^## \[0\.4\.0\] - \d{4}-\d{2}-\d{2}$", CHANGELOG, re.MULTILINE)
     assert heading, "the changelog was never cut (no dated [0.4.0] heading)"
 
-    unreleased = CHANGELOG.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
     release = CHANGELOG[heading.end() :].split("## [0.3.1]", 1)[0]
 
-    assert unreleased.strip() == "", "the Unreleased section must be literally empty"
     assert "Personal Vault" in release, "the vault notes belong to the 0.4.0 release"
     assert "[standing]" in release, "the #141 skill notes belong to the unshipped 0.4.0 release"
     assert "(#142)" in release, "the #142 validate fix ships in 0.4.0"
@@ -153,6 +155,13 @@ def test_changelog_cuts_0_4_1_with_the_standing_output():
     assert "(#140)" in added
     assert "fallback for older CLIs" in changed
     assert "Personal Vault" not in release, "0.4.0 notes must stay in their own section"
+
+
+def test_changelog_records_the_standing_provenance_change():
+    """#146 is noted above the 0.4.1 section, whichever release it ships in."""
+    newer = CHANGELOG.split("\n## [0.4.1]", 1)[0]
+    assert "(#146)" in newer
+    assert "Unverified standing notes" in newer and "[retracts <id>]" in newer
 
 
 def test_newest_changelog_release_matches_the_package_version():

@@ -11,6 +11,37 @@ built sdist and wheel with twine.
 
 ## [Unreleased]
 
+### Added
+
+- `[retracts <id>]` in a later `decisions:` entry removes the line with that id from
+  `glue status` and the resume prompt. `DECISIONS.md` stays append-only and keeps both
+  lines. One bracket may list several ids, and a retraction applies wherever it sits in
+  the file, including after a vault merge reorders lines (#146).
+- `glue create` and `glue validate` warn about a `[standing]` line without a dated
+  operator quote, a `[hold]` without a reason or end condition, and a retraction of an
+  unknown id. The warnings never block a freeze or change an exit code, so existing logs
+  keep working (#146).
+
+### Changed
+
+- Standing decisions carry provenance (#146). Only a `DECISIONS.md` line of the form
+  `[standing] YYYY-MM-DD operator: "<quote>"`, with nothing after the quote, appears under
+  `Standing operator rulings:` in `glue status` and the resume prompt. An agent's hold,
+  `[hold] <what>; reason: <why>; until: <end condition>`, appears under
+  `Agent-recorded holds (verify before relying on them):`. Every other `[standing]` line,
+  including the lines 0.4.1 told agents to write, appears under
+  `Unverified standing notes (agent-written; confirm with the operator before relying on them):`.
+  Each displayed line starts with a stable 8-character id, and `glue status` adds its age.
+  The single `standing:` block in `glue status` is replaced by these labeled blocks. Each
+  block is capped at the newest 20 lines and led by `(+N older lines in DECISIONS.md)`
+  when more exist. A resume prompt with no marked lines stays byte-identical to 0.4.0.
+- Codex and Claude skills record an operator ruling only as a dated quote of the
+  operator's own words, never add conditions to it, record an agent's hold with its reason
+  and end condition, and retract lines that no longer apply. On resume, operator rulings
+  stand as quoted until the operator changes them, agent-recorded holds and unverified
+  notes are state to verify, and a resume must not narrow what the operator granted. The
+  one-way wording that let holds only accumulate is gone (#146).
+
 ## [0.4.1] - 2026-10-13
 
 ### Added
