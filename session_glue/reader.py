@@ -22,7 +22,7 @@ from .writer import (
     DECISIONS_FILENAME,
     INDEX_FILENAME,
     RESUME_PROMPT_FILENAME,
-    read_standing_lines,
+    read_decisions_text,
 )
 
 # Compact fields surfaced by ``glue status``, in display order, mapped from
@@ -136,13 +136,14 @@ def decision_count(repo_root: Path) -> int:
     return sum(1 for line in text.splitlines() if line.startswith("- ["))
 
 
-def standing_decisions(repo_root: Path) -> list[str]:
-    """Every ``[standing]`` line of ``DECISIONS.md``, oldest first (#140).
+def decisions_text(repo_root: Path) -> str:
+    """The ``DECISIONS.md`` text for display, or "" (#140, #146).
 
-    Reads only ``DECISIONS.md``; empty when the file is absent or has none.
-    ``glue status`` caps the display with :func:`schema.render_standing`.
+    Reads only ``DECISIONS.md``; fail-quiet and symlink-refusing (see
+    :func:`writer.read_decisions_text`). ``glue status`` splits it into labeled
+    blocks with :func:`schema.standing_blocks`.
     """
-    return read_standing_lines(Path(repo_root) / AGENT_HISTORY_DIRNAME / DECISIONS_FILENAME)
+    return read_decisions_text(Path(repo_root) / AGENT_HISTORY_DIRNAME / DECISIONS_FILENAME)
 
 
 def existing_session_ids(repo_root: Path) -> set[str]:

@@ -27,7 +27,6 @@ from .schema import (
     join_search_tags,
     parse_frontmatter,
     parse_mapping,
-    standing_lines,
 )
 
 AGENT_HISTORY_DIRNAME = ".agent-history"
@@ -222,27 +221,26 @@ def close_session(repo_root: Path, session_id: str | None, status: str) -> str:
     return str(target)
 
 
-def _decision_line(handoff: Handoff, decision: object) -> str:
+def decision_line(handoff: Handoff, decision: object) -> str:
     """Format one append-only DECISIONS.md line for ``decision``."""
     return f"- [{handoff.session_date}][{handoff.session_id}] {decision}"
 
 
-def read_standing_lines(decisions_path: Path) -> list[str]:
-    """The ``[standing]`` lines of ``decisions_path``, oldest first (#140).
+def read_decisions_text(decisions_path: Path) -> str:
+    """The text of ``decisions_path`` for display, or "" (#140, #146).
 
-    Fail-quiet, because the callers only display these lines: a missing,
-    symlinked, unreadable or non-UTF-8 log yields no lines rather than an error.
-    A symlink is refused like every other ``.agent-history/`` path, so a
+    Fail-quiet, because the callers only display marked lines from it: a
+    missing, symlinked, unreadable or non-UTF-8 log yields "" rather than an
+    error. A symlink is refused like every other ``.agent-history/`` path, so a
     redirected log cannot leak outside content into ``glue status`` or the
     resume prompt.
     """
     if decisions_path.is_symlink() or not decisions_path.is_file():
-        return []
+        return ""
     try:
-        text = decisions_path.read_text(encoding="utf-8")
+        return decisions_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return []
-    return standing_lines(text)
+        return ""
 
 
 def append_decisions(decisions_path: Path, handoff: Handoff) -> bool:
@@ -261,7 +259,7 @@ def append_decisions(decisions_path: Path, handoff: Handoff) -> bool:
     seen = set(existing_text.splitlines())
     new_lines: list[str] = []
     for decision in decisions:
-        line = _decision_line(handoff, decision)
+        line = decision_line(handoff, decision)
         if line in seen:
             continue
         seen.add(line)
@@ -338,10 +336,10 @@ def create_handoff(
     # Append-only decisions log (side output). Only created once a session
     # records a decision; deduped so a re-freeze never duplicates lines. It is
     # written before the resume prompt so the prompt carries this session's
-    # [standing] rulings as well as earlier ones (#140).
+    # rulings, holds and retractions as well as earlier ones (#140, #146).
     has_decisions = append_decisions(decisions_path, handoff)
     resume_path.write_text(
-        build_resume_prompt(handoff, read_standing_lines(decisions_path)), encoding="utf-8"
+        build_resume_prompt(handoff, read_decisions_text(decisions_path)), encoding="utf-8"
     )
 
     written = {

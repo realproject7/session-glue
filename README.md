@@ -61,8 +61,11 @@ references with reasons rather than copying a workflow manual into every handoff
 The receiving agent reads LATEST first, checks the current index lifecycle and
 branch/HEAD/working-tree drift, reconciles applicable instructions, then continues
 authorized work. A prompt cannot grant new authority or clear an operator pause,
-review gate or release gate. Missing essential context must be recovered before
-its dependent action. Read a general reference only for the relevant decision.
+review gate or release gate, and it cannot narrow what the operator granted either.
+Only a dated quote of the operator is shown as an operator ruling; holds that agents
+recorded are shown separately, as state to verify. Missing essential context must be
+recovered before its dependent action. Read a general reference only for the relevant
+decision.
 
 Keep useful context through ordinary fixes. A handoff is for a meaningful restart
 or continuity boundary; it does not require a new session, ticket or PR for each
@@ -150,7 +153,7 @@ A handoff is not free-form prose. Each one is validated before it is written, an
 - the **eight canonical narrative sections** (what happened · decided · failed · next · risks); and
 - **no empty or truncated entries** — every list item is checked.
 
-Two optional fields extend the model without taxing the common case: `decisions:` appends to `DECISIONS.md`, and `supersedes:` links a handoff to the one it replaces, so a chain stays traversable from `glue status`. Complete examples live in `tests/fixtures/handoffs/`; the full contract is in the bundled skill's `references/protocol.md`.
+Two optional fields extend the model without taxing the common case: `decisions:` appends to `DECISIONS.md`, and `supersedes:` links a handoff to the one it replaces, so a chain stays traversable from `glue status`. In `DECISIONS.md`, `[standing] YYYY-MM-DD operator: "<quote>"` records an operator ruling in the operator's own words, `[hold] <what>; reason: <why>; until: <end condition>` records a hold an agent decided, and `[retracts <id>]` retires a line without rewriting the file. `glue status` and the resume prompt show rulings, holds and unquoted legacy notes under separate labels, so an agent's note is never presented as the operator's ruling. Complete examples live in `tests/fixtures/handoffs/`; the full contract is in the bundled skill's `references/protocol.md`.
 
 ### What the structure buys you
 
@@ -369,7 +372,7 @@ glue create --no-exclude    # write handoffs but leave git-ignore state untouche
 ```bash
 glue create --input handoff.md   # archive a handoff (validates first; stdin supported)
 glue validate [--sessions] [--git]   # check .agent-history/ consistency (+ optional git drift)
-glue status [--git]              # compact orientation: latest session, next action, counts, standing rulings
+glue status [--git]              # compact orientation: latest session, next action, counts, rulings and holds
 glue resume-prompt               # print the exact resume prompt
 glue close --status DONE         # set a session's lifecycle status (INDEX-only; archives stay immutable)
 

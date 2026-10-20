@@ -19,9 +19,11 @@ implemented; this is the schema/fixture foundation only.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field, fields
+from datetime import date
 from typing import Any
 
 # Required frontmatter fields, in canonical order.
@@ -586,53 +588,319 @@ def build_index_entry(handoff: Handoff) -> dict[str, Any]:
     }
 
 
-#: Marker that makes a ``DECISIONS.md`` line a standing operator ruling (#140).
-#: Plain text: nothing in the schema parses it, ``glue create`` stores it verbatim.
+# --------------------------------------------------------------------------- #
+# Standing decisions: operator rulings, agent holds and retractions (#140, #146)
+# --------------------------------------------------------------------------- #
+
+#: Marker of a standing operator ruling (#140). Since #146 a ruling counts only
+#: in the form ``[standing] YYYY-MM-DD operator: "<the operator's exact words>"``;
+#: any other line carrying the marker is shown as an unverified note.
 STANDING_MARKER = "[standing]"
-#: ``glue status`` and the resume prompt show at most this many standing lines.
+#: Marker of a hold an agent recorded (#146): state to verify, never authority.
+#: Complete form: ``[hold] <what>; reason: <why>; until: <end condition>``.
+HOLD_MARKER = "[hold]"
+#: ``glue status`` and the resume prompt show at most this many lines per block.
 STANDING_LIMIT = 20
 
+#: Block labels shared by ``glue status`` and the resume prompt (#146). Only a
+#: quoted, dated operator line ever appears under ``RULINGS_LABEL``.
+RULINGS_LABEL = "Standing operator rulings:"
+HOLDS_LABEL = "Agent-recorded holds (verify before relying on them):"
+UNVERIFIED_LABEL = (
+    "Unverified standing notes (agent-written; confirm with the operator before relying on them):"
+)
 
-def standing_lines(decisions_text: str | None) -> list[str]:
-    """Every ``DECISIONS.md`` line containing ``[standing]``, in file order.
+RULING = "ruling"
+HOLD = "hold"
+UNVERIFIED = "unverified"
+RETRACTION = "retraction"
+
+RULING_FORMAT = '[standing] YYYY-MM-DD operator: "<the operator\'s exact words>"'
+HOLD_FORMAT = "[hold] <what>; reason: <why>; until: <end condition>"
+RETRACTION_FORMAT = "[retracts <id>]"
+
+# ``- [session_date][session_id] <decision>``: the line ``glue create`` writes.
+_DECISION_LINE_RE = re.compile(r"^- \[(?P<date>[^\]]*)\]\[(?P<session>[^\]]*)\] (?P<text>.*)$")
+# The quote runs to the end of the decision: nothing may follow it, so an agent
+# cannot append a condition or restriction to the operator's words.
+_RULING_RE = re.compile(
+    r'^\[standing\]\s+(?P<date>\d{4}-\d{2}-\d{2})\s+operator:\s*"(?P<quote>[^"]*)"$'
+)
+_HOLD_RE = re.compile(
+    r"^\[hold\]\s+(?P<what>.+?);\s*reason:\s*(?P<reason>.+?);\s*until:\s*(?P<until>.+)$"
+)
+_RETRACTS_RE = re.compile(
+    r"\[retracts\s+(?P<refs>[0-9a-f]{8}(?:[\s,]+[0-9a-f]{8})*)\s*\]", re.IGNORECASE
+)
+_REF_RE = re.compile(r"[0-9a-f]{8}", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class DecisionEntry:
+    """One classified ``DECISIONS.md`` line that carries a marker (#146).
+
+    ``ref`` is the line's stable id: the first 8 hex digits of the SHA-256 of
+    the stripped line. The log is append-only and the vault merge keeps lines
+    byte-for-byte, so the id never changes. ``date`` is the ruling's own date
+    for an operator ruling and the session date otherwise (None when absent).
+    """
+
+    ref: str
+    line: str
+    kind: str
+    date: str | None = None
+    retracts: tuple[str, ...] = ()
+
+
+def decision_ref(line: str) -> str:
+    """The stable id of one ``DECISIONS.md`` line (see :class:`DecisionEntry`)."""
+    return hashlib.sha256(line.strip().encode("utf-8")).hexdigest()[:8]
+
+
+def _decision_text(line: str) -> str:
+    """The decision itself: a line without its ``- [date][session]`` prefix."""
+    stripped = line.strip()
+    prefix = _DECISION_LINE_RE.match(stripped)
+    return prefix.group("text").strip() if prefix else stripped
+
+
+def _valid_date(value: str) -> bool:
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _ruling_match(text: str) -> re.Match[str] | None:
+    """Match an operator ruling: a real date and a non-blank quote, nothing after."""
+    match = _RULING_RE.match(text.strip())
+    if match is None or not match.group("quote").strip():
+        return None
+    return match if _valid_date(match.group("date")) else None
+
+
+def _retracted_refs(text: str) -> tuple[str, ...]:
+    refs: list[str] = []
+    for match in _RETRACTS_RE.finditer(text):
+        refs.extend(ref.lower() for ref in _REF_RE.findall(match.group("refs")))
+    return tuple(refs)
+
+
+def classify_decision(line: str) -> DecisionEntry | None:
+    """Classify one ``DECISIONS.md`` line, or None for a plain decision.
+
+    Precedence: a quoted operator ruling, then a retraction, then any other
+    line containing ``[standing]`` (unverified: legacy or unquoted), then a
+    line containing ``[hold]``. A line that does not start with the
+    ``- [date][session]`` prefix (a hand-appended one) is classified on its own
+    text, with no date.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return None
+    prefix = _DECISION_LINE_RE.match(stripped)
+    text = _decision_text(stripped)
+    session_date = prefix.group("date") if prefix else None
+    ref = decision_ref(stripped)
+
+    ruling = _ruling_match(text)
+    if ruling is not None:
+        return DecisionEntry(ref, stripped, RULING, ruling.group("date"))
+    retracts = _retracted_refs(text)
+    if retracts:
+        return DecisionEntry(ref, stripped, RETRACTION, session_date, retracts)
+    if STANDING_MARKER in text:
+        return DecisionEntry(ref, stripped, UNVERIFIED, session_date)
+    if HOLD_MARKER in text:
+        return DecisionEntry(ref, stripped, HOLD, session_date)
+    return None
+
+
+def parse_decisions(decisions_text: str | None) -> list[DecisionEntry]:
+    """Every marked line of a ``DECISIONS.md`` text, in file order.
 
     The log is append-only (and the vault merge sorts it by session date), so
     file order is oldest first, newest last.
     """
-    if not decisions_text:
-        return []
-    return [line.strip() for line in decisions_text.splitlines() if STANDING_MARKER in line]
+    entries: list[DecisionEntry] = []
+    for raw in (decisions_text or "").splitlines():
+        entry = classify_decision(raw)
+        if entry is not None:
+            entries.append(entry)
+    return entries
 
 
-def render_standing(lines: Sequence[str], limit: int = STANDING_LIMIT) -> list[str]:
-    """The displayed standing block: the newest ``limit`` lines, oldest first.
+@dataclass(frozen=True)
+class StandingView:
+    """The live standing lines of a log, split by provenance (#146).
 
-    When more exist, one ``(+N older standing lines in DECISIONS.md)`` line comes
-    first, so the reader knows the file holds more. Empty in, empty out.
+    Retracted lines are already removed. A retraction applies wherever it sits
+    in the file, because the vault merge may reorder lines by session date.
     """
-    shown = list(lines)[-limit:] if limit > 0 else []
-    older = len(lines) - len(shown)
-    block = [f"(+{older} older standing lines in DECISIONS.md)"] if older else []
-    return block + shown
+
+    rulings: tuple[DecisionEntry, ...] = ()
+    holds: tuple[DecisionEntry, ...] = ()
+    unverified: tuple[DecisionEntry, ...] = ()
+    unknown_retractions: tuple[str, ...] = ()
 
 
-def build_resume_prompt(handoff: Handoff, standing: Sequence[str] = ()) -> str:
+def standing_view(decisions_text: str | None) -> StandingView:
+    """Split a ``DECISIONS.md`` text into live rulings, holds and unverified notes."""
+    entries = parse_decisions(decisions_text)
+    retracted = frozenset(ref for entry in entries for ref in entry.retracts)
+    shown = {entry.ref for entry in entries if entry.kind != RETRACTION}
+
+    def live(kind: str) -> tuple[DecisionEntry, ...]:
+        return tuple(e for e in entries if e.kind == kind and e.ref not in retracted)
+
+    unknown = tuple(sorted(ref for ref in retracted if ref not in shown))
+    return StandingView(live(RULING), live(HOLD), live(UNVERIFIED), unknown)
+
+
+def _age(entry_date: str | None, today: date) -> str:
+    if not entry_date or not _valid_date(entry_date):
+        return "undated"
+    days = (today - date.fromisoformat(entry_date)).days
+    if days <= 0:
+        return "today"
+    return "1 day old" if days == 1 else f"{days} days old"
+
+
+def display_decision(entry: DecisionEntry, today: date | None = None) -> str:
+    """One displayed line: the id, the age when ``today`` is given, then the line.
+
+    The leading ``- `` list marker is dropped; the rest is the line exactly as
+    ``DECISIONS.md`` holds it.
+    """
+    body = entry.line[2:] if entry.line.startswith("- ") else entry.line
+    age = f" ({_age(entry.date, today)})" if today is not None else ""
+    return f"{entry.ref}{age} {body}"
+
+
+def render_block(
+    entries: Sequence[DecisionEntry], limit: int = STANDING_LIMIT, today: date | None = None
+) -> list[str]:
+    """One displayed block: the newest ``limit`` entries, oldest first.
+
+    When more exist, one ``(+N older lines in DECISIONS.md)`` line comes first,
+    so the reader knows the file holds more. Empty in, empty out.
+    """
+    shown = list(entries)[-limit:] if limit > 0 else []
+    older = len(entries) - len(shown)
+    block = [f"(+{older} older lines in DECISIONS.md)"] if older else []
+    return block + [display_decision(entry, today) for entry in shown]
+
+
+def standing_blocks(
+    decisions_text: str | None, today: date | None = None, limit: int = STANDING_LIMIT
+) -> list[tuple[str, list[str]]]:
+    """The ``(label, lines)`` blocks ``glue status`` and the resume prompt print.
+
+    Order: operator rulings, agent-recorded holds, unverified notes. A block
+    with no live lines is left out, so a log without marked lines yields [].
+    """
+    view = standing_view(decisions_text)
+    blocks: list[tuple[str, list[str]]] = []
+    for label, entries in (
+        (RULINGS_LABEL, view.rulings),
+        (HOLDS_LABEL, view.holds),
+        (UNVERIFIED_LABEL, view.unverified),
+    ):
+        lines = render_block(entries, limit, today)
+        if lines:
+            blocks.append((label, lines))
+    return blocks
+
+
+def decision_warnings(decision: object) -> list[str]:
+    """Advisory provenance checks for one ``decisions:`` entry (#146).
+
+    Never errors: an unquoted ``[standing]`` is stored and shown as an
+    unverified note rather than refused, so an agent is never pushed to invent
+    a quote to get a freeze through.
+    """
+    text = str(decision).strip()
+    entry = classify_decision(text)
+    warnings: list[str] = []
+    if entry is None:
+        if "[retracts" in text.lower():
+            warnings.append(
+                f"a retraction must name 8-character ids from glue status: {RETRACTION_FORMAT}"
+            )
+        return warnings
+    if entry.kind == UNVERIFIED:
+        warnings.append(
+            "[standing] needs the operator's own words and a date, with nothing after "
+            f"the quote: {RULING_FORMAT}. It will be shown as an unverified note, "
+            "not as an operator ruling"
+        )
+    elif entry.kind == HOLD and _HOLD_RE.match(text) is None:
+        warnings.append(f"[hold] needs a reason and an end condition: {HOLD_FORMAT}")
+    return warnings
+
+
+def log_warnings(decisions_text: str | None) -> list[str]:
+    """Advisory warnings for a whole ``DECISIONS.md`` text (``glue validate``)."""
+    view = standing_view(decisions_text)
+    warnings: list[str] = []
+    if view.unverified:
+        warnings.append(
+            f"DECISIONS.md: {len(view.unverified)} [standing] line(s) lack the operator's "
+            f"quoted words and a date ({RULING_FORMAT}); they show as unverified notes. "
+            "Confirm each with the operator, then record it in that form or retract it"
+        )
+    open_ended = [hold for hold in view.holds if _HOLD_RE.match(_decision_text(hold.line)) is None]
+    if open_ended:
+        warnings.append(
+            f"DECISIONS.md: {len(open_ended)} [hold] line(s) lack a reason or an end "
+            f"condition ({HOLD_FORMAT})"
+        )
+    for ref in view.unknown_retractions:
+        warnings.append(f"DECISIONS.md: [retracts {ref}] names no standing line, hold or note")
+    return warnings
+
+
+def new_decision_warnings(
+    existing_text: str | None, decisions: Sequence[object], lines: Sequence[str]
+) -> list[str]:
+    """Advisory checks for the ``decisions:`` a handoff is about to append (#146).
+
+    ``lines`` are the ``DECISIONS.md`` lines those decisions become. Each
+    decision gets :func:`decision_warnings`, and a retraction must name the id
+    of a standing line, hold or note in the existing log or in this handoff.
+    """
+    combined = (existing_text or "") + "\n" + "\n".join(lines)
+    known = {entry.ref for entry in parse_decisions(combined) if entry.kind != RETRACTION}
+    warnings: list[str] = []
+    for idx, (decision, line) in enumerate(zip(decisions, lines)):
+        warnings.extend(f"decisions[{idx}]: {w}" for w in decision_warnings(decision))
+        entry = classify_decision(line)
+        if entry is not None and entry.kind == RETRACTION:
+            warnings.extend(
+                f"decisions[{idx}]: [retracts {ref}] names no standing line, hold or note "
+                "in DECISIONS.md (glue status lists the ids)"
+                for ref in entry.retracts
+                if ref not in known
+            )
+    return warnings
+
+
+def build_resume_prompt(handoff: Handoff, decisions: str | None = None) -> str:
     """Generate the ``RESUME_PROMPT.txt`` body for a handoff.
 
     The prompt points the next session at ``.agent-history/LATEST.md`` and tells
-    it to continue from the first ``next_todo_items`` entry. ``standing`` holds
-    the ``[standing]`` lines of ``DECISIONS.md`` (see :func:`standing_lines`);
-    when non-empty they follow the first action under ``Standing operator
-    rulings:``, capped by :func:`render_standing`. Without them the prompt is
-    byte-identical to the one 0.4.0 generated.
+    it to continue from the first ``next_todo_items`` entry. ``decisions`` is
+    the ``DECISIONS.md`` text; its live marked lines follow the first action in
+    the blocks of :func:`standing_blocks`, each capped at the newest
+    ``STANDING_LIMIT``. Without marked lines the prompt is byte-identical to the
+    one 0.4.0 generated.
     """
     project_root = handoff.project_root or "(unknown)"
     first_action = handoff.first_next_action or "(no next action recorded)"
-    block = render_standing(standing)
-    standing_text = (
-        "Standing operator rulings:\n" + "".join(f"{line}\n" for line in block) + "\n"
-        if block
-        else ""
+    standing_text = "".join(
+        label + "\n" + "".join(f"{line}\n" for line in lines) + "\n"
+        for label, lines in standing_blocks(decisions)
     )
     return (
         "Continue the previous coding session.\n"

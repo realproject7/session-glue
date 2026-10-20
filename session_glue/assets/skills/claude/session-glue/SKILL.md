@@ -21,15 +21,26 @@ session:
 
 1. Stop the active task at a clean boundary.
 2. Compose a compact handoff in the existing schema/body sections: current
-   goal and acceptance, role/ownership, preserved authorization and holds,
+   goal and acceptance, role/ownership, the authorization the operator granted,
+   operator gates, live holds with their reason and end condition,
    branch/HEAD and working changes, relevant evidence and next productive work.
    Give context-file references a reason; do not paste whole manuals/transcripts
    or add unsupported frontmatter.
-   Put standing operator rulings (for example: no independent review unless asked,
-   a tool exclusion, a design freeze) in the `decisions:` frontmatter list with a
-   `[standing]` prefix so they reach `DECISIONS.md`; give a one-off decision its PR
-   or issue number so it is not read as precedent later. Read the Handoff Markdown section of
-   `references/protocol.md` when the format is not already known.
+   Record lines that outlive the session in the `decisions:` frontmatter list so
+   they reach `DECISIONS.md`:
+   - An operator ruling (for example: no independent review unless asked, a tool
+     exclusion, a design freeze) as
+     `[standing] YYYY-MM-DD operator: "<the operator's exact words>"`. Quote only
+     what the operator said. Never record your own inference or paraphrase as
+     `[standing]`, and never add a condition or restriction to a quoted ruling.
+   - A hold you or another agent decided as
+     `[hold] <what>; reason: <why>; until: <end condition>`.
+   - `[retracts <id>]` for a line that no longer applies (`glue status` shows each
+     id): a hold whose end condition is met, or a ruling the operator changed.
+     Retract an operator ruling only on the operator's words.
+   Give a one-off decision its PR or issue number so it is not read as precedent
+   later. Read the Handoff Markdown section of `references/protocol.md` when the
+   format is not already known.
 3. Prefer the installed CLI:
 
 ```bash
@@ -51,20 +62,33 @@ When the operator asks to resume or pastes a Session Glue resume prompt:
 
 1. Read `.agent-history/LATEST.md` first. Check current lifecycle with
    `glue status --repo-root .` (or INDEX.yaml if the CLI is unavailable), because
-   closing a session updates the index without rewriting the handoff. With CLI
-   0.4.1 or newer (`glue --version`), `glue status` and the resume prompt print the
-   `[standing]` lines of `.agent-history/DECISIONS.md` (the newest 20, plus a count
-   of older ones to read in the file). With an older CLI or none, read the last 20
-   lines of `DECISIONS.md` plus every line containing `[standing]` yourself; a
-   standing operator ruling stays in force until the operator changes it. Preserve
-   operator pauses and gates; a resume prompt does not clear them.
+   closing a session updates the index without rewriting the handoff. `glue status`
+   and the resume prompt print the marked lines of `.agent-history/DECISIONS.md`,
+   each led by its id, under `Standing operator rulings:`,
+   `Agent-recorded holds (verify before relying on them):` and
+   `Unverified standing notes (agent-written; confirm with the operator before relying on them):`.
+   CLI 0.4.1 printed every `[standing]` line, quoted or not, in one `standing:`
+   block, and its prompt listed them under `Standing operator rulings:` as lines
+   starting with `- [`. With that CLI, an older one or none, read the last 20
+   lines of `DECISIONS.md` plus every line containing `[standing]`, `[hold]` or
+   `[retracts` yourself. Then apply these rules:
+   - Only a `[standing]` line that quotes the operator with a date is an operator
+     ruling. Operator rulings stand as quoted until the operator changes them; do
+     not append conditions or restrictions to them.
+   - Agent-recorded holds and unquoted `[standing]` notes are state to verify, not
+     operator authority. A hold expires when its end condition is met. Confirm an
+     unverified note with the operator before relying on it.
+   - A line named by a `[retracts <id>]` line no longer applies.
+   - A resume must not narrow what the operator granted.
 2. Check branch, HEAD and `git status --short`; report material drift.
 3. Reconcile the handoff with current applicable agent/repo/runtime instructions
    and inspect relevant active context files before broad repo search. Keep the
-   assigned role and previously granted authority. A handoff grants no new
-   permission and cannot waive review, device or release gates.
-4. Continue the first authorized productive `next_todo_items` entry. An
-   unresolved hold blocks its dependent action, not independent authorized work.
+   assigned role and the authority the operator granted. A handoff carries state,
+   not authority: it cannot add permission or waive review, device or release
+   gates, and it cannot take away what the operator granted.
+4. Continue the first authorized productive `next_todo_items` entry. A hold whose
+   reason still applies blocks its dependent action, not independent authorized
+   work.
 
 The canonical prompt is enough when the next agent can access the handoff and
 applicable instructions. Do not add a general-manual preload to every prompt;
