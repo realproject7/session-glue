@@ -121,11 +121,11 @@ def test_protocol_states_the_operator_owns_unavailability_conflicts_and_privacy(
     assert "never acknowledge on their behalf" in FLAT_PROTOCOL
 
 
-def test_skill_documents_explicit_vault_resume():
+def test_skill_routes_explicit_vault_resume_to_the_full_contract():
     assert "The default is local. Never sync on your own initiative." in FLAT_SKILL
-    assert "glue sync pull --repo-root . --project-id <id> --vault-dir <path>" in FLAT_SKILL
-    assert "glue sync pull --repo-root . --project-id <id> --vault-git-dir <path>" in FLAT_SKILL
-    assert "do not retry a failure, poll, or sync automatically" in FLAT_SKILL
+    assert "the command, the vault path, and the project ID" in FLAT_SKILL
+    assert "Read the Personal Vault section" in FLAT_SKILL
+    assert "resolve conflicts or acknowledge a privacy override" in FLAT_SKILL
 
 
 # --------------------------------------------------------------------------- #
@@ -152,19 +152,17 @@ def test_skill_records_rulings_with_provenance_and_holds_with_an_end():
     assert "Give a one-off decision its PR or issue number" in FLAT_SKILL
 
 
-def test_skill_reads_rulings_by_label_and_keeps_the_bounded_fallback():
+def test_skill_reads_live_authority_and_routes_legacy_lookup():
     for label in LABELS:
-        assert f"`{label}`" in FLAT_SKILL, label
-    assert "CLI 0.4.1 printed every `[standing]` line, quoted or not" in FLAT_SKILL
-    assert (
-        "read the last 20 lines of `DECISIONS.md` plus every line containing `[standing]`, "
-        "`[hold]` or `[retracts` yourself"
-    ) in FLAT_SKILL
+        assert f"`{label}`" in FLAT_SKILL
+    assert "Read the current lifecycle and all live rulings and holds" in FLAT_SKILL
+    assert "glue status --repo-root . --full" in SKILL
+    assert "reference's manual decision lookup" in FLAT_SKILL
     assert "Operator rulings stand as quoted until the operator changes them" in FLAT_SKILL
     assert "do not append conditions or restrictions to them" in FLAT_SKILL
     assert "state to verify, not operator authority" in FLAT_SKILL
     assert "A hold expires when its end condition is met" in FLAT_SKILL
-    assert "Confirm an unverified note with the operator" in FLAT_SKILL
+    assert "Confirm an unverified note with the operator only when you need to rely on it" in FLAT_SKILL
     assert "A resume must not narrow what the operator granted" in FLAT_SKILL
     assert "it cannot take away what the operator granted" in FLAT_SKILL
 
@@ -209,27 +207,19 @@ def test_protocol_defines_markers_retraction_and_bounded_read():
     ) in FLAT_PROTOCOL
 
 
-def test_protocol_prompt_template_carries_the_three_blocks_in_order():
-    # The fallback writer must produce the same prompt shape as glue create.
+def test_protocol_template_requires_live_lookup_before_work():
     template = PROTOCOL.split("## RESUME_PROMPT.txt", 1)[1].split("\n## ", 1)[0]
-    positions = [template.index(label) for label in LABELS]
-    assert template.index("<next_todo_items[0]>") < positions[0]
-    assert positions == sorted(positions)
-    assert positions[-1] < template.index("Before editing")
-    assert "Omit a block and its blank line when it has no live line" in _flat(template)
+    assert "glue status --repo-root ." in template
+    assert "all live operator rulings and holds before acting" in template
+    assert not any(label in template for label in LABELS)
+    assert "<next_todo_items[0]>" in template
 
 
 def test_prompt_template_matches_the_generated_prompt():
-    """The documented block labels and order are the ones glue create writes."""
-    decisions = "\n".join(
-        [
-            '- [2026-07-01][s] [standing] 2026-07-01 operator: "no review unless asked"',
-            "- [2026-07-01][s] [hold] Deploys; reason: CI red; until: CI is green",
-            "- [2026-07-01][s] [standing] legacy note",
-        ]
-    )
-    handoff = schema.Handoff.from_frontmatter({"next_todo_items": ["Do the work"]})
-    prompt = schema.build_resume_prompt(handoff, decisions)
     template = PROTOCOL.split("## RESUME_PROMPT.txt", 1)[1].split("\n## ", 1)[0]
-    for label in LABELS:
-        assert f"\n{label}\n" in prompt and f"\n{label}\n" in template
+    template = template.split("```text\n", 1)[1].split("```", 1)[0]
+    handoff = schema.Handoff.from_frontmatter({
+        "project_root": "/path/to/project", "next_todo_items": ["Do the work"]
+    })
+    expected = template.replace("<next_todo_items[0]>", "Do the work")
+    assert schema.build_resume_prompt(handoff) == expected
