@@ -599,10 +599,10 @@ STANDING_MARKER = "[standing]"
 #: Marker of a hold an agent recorded (#146): state to verify, never authority.
 #: Complete form: ``[hold] <what>; reason: <why>; until: <end condition>``.
 HOLD_MARKER = "[hold]"
-#: ``glue status`` and the resume prompt show at most this many lines per block.
+#: Default cap for the legacy block-rendering API; live status is uncapped.
 STANDING_LIMIT = 20
 
-#: Block labels shared by ``glue status`` and the resume prompt (#146). Only a
+#: Block labels for the live decision view (#146). Only a
 #: quoted, dated operator line ever appears under ``RULINGS_LABEL``.
 RULINGS_LABEL = "Standing operator rulings:"
 HOLDS_LABEL = "Agent-recorded holds (verify before relying on them):"
@@ -779,23 +779,27 @@ def display_decision(entry: DecisionEntry, today: date | None = None) -> str:
 
 
 def render_block(
-    entries: Sequence[DecisionEntry], limit: int = STANDING_LIMIT, today: date | None = None
+    entries: Sequence[DecisionEntry], limit: int | None = STANDING_LIMIT,
+    today: date | None = None,
 ) -> list[str]:
     """One displayed block: the newest ``limit`` entries, oldest first.
 
-    When more exist, one ``(+N older lines in DECISIONS.md)`` line comes first,
-    so the reader knows the file holds more. Empty in, empty out.
+    None disables the legacy cap. When more exist, one count line comes first.
+    Empty in, empty out.
     """
-    shown = list(entries)[-limit:] if limit > 0 else []
+    if limit is None:
+        shown = list(entries)
+    else:
+        shown = list(entries)[-limit:] if limit > 0 else []
     older = len(entries) - len(shown)
     block = [f"(+{older} older lines in DECISIONS.md)"] if older else []
     return block + [display_decision(entry, today) for entry in shown]
 
 
 def standing_blocks(
-    decisions_text: str | None, today: date | None = None, limit: int = STANDING_LIMIT
+    decisions_text: str | None, today: date | None = None, limit: int | None = STANDING_LIMIT
 ) -> list[tuple[str, list[str]]]:
-    """The ``(label, lines)`` blocks ``glue status`` and the resume prompt print.
+    """Legacy labeled blocks; live status explicitly chooses its display policy.
 
     Order: operator rulings, agent-recorded holds, unverified notes. A block
     with no live lines is left out, so a log without marked lines yields [].
@@ -811,6 +815,58 @@ def standing_blocks(
         if lines:
             blocks.append((label, lines))
     return blocks
+
+
+def status_decision_blocks(
+    decisions_text: str | None, today: date | None = None, *, full: bool = False
+) -> list[tuple[str, list[str]]]:
+    """All live authority, with exact repeated dated quotes grouped only for display.
+
+    The log and parsed view stay untouched. Retractions are applied before grouping;
+    each remaining source id is visible. Full output exposes every original live
+    marked line without a cap, including legacy notes and duplicate provenance.
+    """
+    if full:
+        return standing_blocks(decisions_text, today=today, limit=None)
+    view = standing_view(decisions_text)
+    groups: dict[tuple[str, str], list[DecisionEntry]] = {}
+    for entry in view.rulings:
+        match = _ruling_match(_decision_text(entry.line))
+        assert match is not None
+        key = (match.group("date"), match.group("quote"))
+        groups.setdefault(key, []).append(entry)
+    rulings = []
+    for entries in groups.values():
+        rulings.append(display_decision(entries[0], today))
+        if len(entries) > 1:
+            rulings.append("also recorded as: " + ", ".join(e.ref for e in entries[1:]))
+    blocks = []
+    if rulings:
+        blocks.append((RULINGS_LABEL, rulings))
+    if view.holds:
+        blocks.append((HOLDS_LABEL, [display_decision(e, today) for e in view.holds]))
+    if view.unverified:
+        blocks.append((UNVERIFIED_LABEL, [
+            f"{len(view.unverified)} live note(s); use glue status --full with the same "
+            "--repo-root to inspect originals before relying on one."
+        ]))
+    return blocks
+
+
+def context_size_warnings(handoff_text: str, prompt_text: str = "") -> list[str]:
+    """Advisory UTF-8 budgets, never validation errors or automatic truncation."""
+    warnings = []
+    for name, text, target in (
+        ("LATEST.md", handoff_text, 6144),
+        ("RESUME_PROMPT.txt", prompt_text, 1024),
+    ):
+        size = len(text.encode("utf-8"))
+        if size > target:
+            warnings.append(
+                f"size advisory: {name} is {size} bytes (target <= {target}); "
+                "keep current facts once and link historical evidence; do not drop authority."
+            )
+    return warnings
 
 
 def decision_warnings(decision: object) -> list[str]:
@@ -887,34 +943,27 @@ def new_decision_warnings(
 
 
 def build_resume_prompt(handoff: Handoff, decisions: str | None = None) -> str:
-    """Generate the ``RESUME_PROMPT.txt`` body for a handoff.
+    """Generate a history-independent entry point, with mandatory live-state lookup.
 
-    The prompt points the next session at ``.agent-history/LATEST.md`` and tells
-    it to continue from the first ``next_todo_items`` entry. ``decisions`` is
-    the ``DECISIONS.md`` text; its live marked lines follow the first action in
-    the blocks of :func:`standing_blocks`, each capped at the newest
-    ``STANDING_LIMIT``. Without marked lines the prompt is byte-identical to the
-    one 0.4.0 generated.
+    ``decisions`` remains accepted for writer/vault and third-party compatibility.
+    Authority is read from current status instead of a potentially stale prompt copy.
     """
     project_root = handoff.project_root or "(unknown)"
     first_action = handoff.first_next_action or "(no next action recorded)"
-    standing_text = "".join(
-        label + "\n" + "".join(f"{line}\n" for line in lines) + "\n"
-        for label, lines in standing_blocks(decisions)
-    )
     return (
         "Continue the previous coding session.\n"
         "\n"
         f"Project root: {project_root}\n"
         "First, read: .agent-history/LATEST.md\n"
         "Prompt artifact: .agent-history/RESUME_PROMPT.txt\n"
+        "Then run in the project root: glue status --repo-root .\n"
+        "Read current lifecycle and all live operator rulings and holds before acting.\n"
         "Then follow the Resume Prompt and continue from the first "
         "next_todo_items entry.\n"
         "\n"
         "First productive next action (next_todo_items[0]):\n"
         f"{first_action}\n"
         "\n"
-        f"{standing_text}"
         "Before editing, run git status --short and report any drift from the "
         "handoff.\n"
         "Do not scan the whole repository unless the handoff is stale or "

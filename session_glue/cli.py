@@ -32,11 +32,12 @@ from . import (
 from .schema import (
     Handoff,
     HandoffParseError,
+    context_size_warnings,
     lint_first_next_action,
     log_warnings,
     new_decision_warnings,
     parse_frontmatter,
-    standing_blocks,
+    status_decision_blocks,
 )
 
 
@@ -155,6 +156,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     status.set_defaults(func=_cmd_status)
+    status.add_argument(
+        "--full", action="store_true",
+        help="Show every live original ruling, hold and unverified note, without grouping or caps.",
+    )
 
     resume_prompt = subparsers.add_parser(
         "resume-prompt",
@@ -963,6 +968,11 @@ def _cmd_create(args: argparse.Namespace) -> int:
     print("Wrote handoff for session " + str(handoff.session_id) + ":")
     for label in ("archive", "latest", "resume_prompt", "index"):
         print(f"  {label}: {written[label]}")
+    for warning in context_size_warnings(
+        written["latest"].read_text(encoding="utf-8"),
+        written["resume_prompt"].read_text(encoding="utf-8"),
+    ):
+        print(f"glue create: WARNING: {warning}", file=sys.stderr)
 
     # Zero-pollution default (issue #66): personally ignore .agent-history/ via
     # .git/info/exclude so a first freeze does not dirty `git status`. Runs
@@ -997,6 +1007,12 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     # but never flip the exit code — only real validation problems do that.
     latest = repo_root / ".agent-history" / "LATEST.md"
     if latest.is_file():
+        prompt = latest.with_name("RESUME_PROMPT.txt")
+        for warning in context_size_warnings(
+            latest.read_text(encoding="utf-8"),
+            prompt.read_text(encoding="utf-8") if prompt.is_file() else "",
+        ):
+            print(f"glue validate: WARNING: {warning}", file=sys.stderr)
         for warning in leakscan.scan_handoff(latest.read_text(encoding="utf-8"), repo_root):
             print(f"glue validate: WARNING: {warning}", file=sys.stderr)
 
@@ -1061,12 +1077,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if prior is not None:
         print(f"lineage: {index.get('latest_session')} <- supersedes {prior}")
 
-    # Marked DECISIONS.md lines by provenance (#140, #146): quoted operator
-    # rulings, agent-recorded holds, unverified notes. Each line shows its id
-    # (for [retracts <id>]) and age; retracted lines are gone. Each block is
-    # oldest first and capped at the newest STANDING_LIMIT; silent when empty.
-    for label, lines in standing_blocks(
-        reader.decisions_text(Path(args.repo_root)), today=date.today()
+    # Compact display changes no history; --full recovers every live source line.
+    for label, lines in status_decision_blocks(
+        reader.decisions_text(Path(args.repo_root)), today=date.today(), full=args.full
     ):
         print(label)
         for line in lines:

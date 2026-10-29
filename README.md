@@ -153,7 +153,12 @@ A handoff is not free-form prose. Each one is validated before it is written, an
 - the **eight canonical narrative sections** (what happened · decided · failed · next · risks); and
 - **no empty or truncated entries** — every list item is checked.
 
-Two optional fields extend the model without taxing the common case: `decisions:` appends to `DECISIONS.md`, and `supersedes:` links a handoff to the one it replaces, so a chain stays traversable from `glue status`. In `DECISIONS.md`, `[standing] YYYY-MM-DD operator: "<quote>"` records an operator ruling in the operator's own words, `[hold] <what>; reason: <why>; until: <end condition>` records a hold an agent decided, and `[retracts <id>]` retires a line without rewriting the file. `glue status` and the resume prompt show rulings, holds and unquoted legacy notes under separate labels, so an agent's note is never presented as the operator's ruling. Complete examples live in `tests/fixtures/handoffs/`; the full contract is in the bundled skill's `references/protocol.md`.
+Two optional fields extend the model without taxing the common case: `decisions:` appends to `DECISIONS.md`, and `supersedes:` links a handoff to the one it replaces, so a chain stays traversable from `glue status`. In `DECISIONS.md`, `[standing] YYYY-MM-DD operator: "<quote>"` records an operator ruling in the operator's own words, `[hold] <what>; reason: <why>; until: <end condition>` records a hold an agent decided, and `[retracts <id>]` retires a line without rewriting the file. `glue status` shows all live rulings and holds, grouping only identical dated quotes while retaining source ids. Unverified legacy notes are summarized; `glue status --full` shows every live original marked record without a cap. The paste-ready prompt points to this lookup instead of embedding decision history, so its size does not grow with the log. Complete examples live in `tests/fixtures/handoffs/`; the full contract is in the bundled skill's `references/protocol.md`.
+
+Keep the current-state handoff around 4–6 KB, with each fact once and detailed
+evidence linked. Required headings may be brief; archived sessions retain the history.
+Size warnings above 6 KiB for the handoff or 1 KiB for the prompt are advisory and
+never prevent capture. Existing history, decision ids and old prompts remain valid.
 
 ### What the structure buys you
 

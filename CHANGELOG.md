@@ -13,6 +13,12 @@ built sdist and wheel with twine.
 
 ### Added
 
+- `glue status --full` exposes every live original marked decision without grouping
+  or a count cap. Default status retains every live ruling and hold, groups only exact
+  repeated dated quotes with all source ids, and summarizes unverified notes (#148).
+- Advisory UTF-8 size warnings above 6 KiB for LATEST and 1 KiB for the resume prompt,
+  without blocking capture or truncating content (#148).
+
 - `[retracts <id>]` in a later `decisions:` entry removes the line with that id from
   `glue status` and the resume prompt. `DECISIONS.md` stays append-only and keeps both
   lines. One bracket may list several ids, and a retraction applies wherever it sits in
@@ -24,17 +30,22 @@ built sdist and wheel with twine.
 
 ### Changed
 
+- Resume prompts are history-independent entry points: read LATEST, then current
+  lifecycle and live rulings/holds through status before acting. Skills guide a compact
+  current-state handoff and evidence references instead of repeated history. Existing
+  archives and decision logs stay unchanged; old embedded prompts still work (#148).
+
 - Standing decisions carry provenance (#146). Only a `DECISIONS.md` line of the form
   `[standing] YYYY-MM-DD operator: "<quote>"`, with nothing after the quote, appears under
-  `Standing operator rulings:` in `glue status` and the resume prompt. An agent's hold,
+  `Standing operator rulings:` in the live decision view. An agent's hold,
   `[hold] <what>; reason: <why>; until: <end condition>`, appears under
   `Agent-recorded holds (verify before relying on them):`. Every other `[standing]` line,
   including the lines 0.4.1 told agents to write, appears under
   `Unverified standing notes (agent-written; confirm with the operator before relying on them):`.
   Each displayed line starts with a stable 8-character id, and `glue status` adds its age.
   The single `standing:` block in `glue status` is replaced by these labeled blocks. Each
-  block is capped at the newest 20 lines and led by `(+N older lines in DECISIONS.md)`
-  when more exist. A resume prompt with no marked lines stays byte-identical to 0.4.0.
+  block originally used a newest-20 cap; #148 replaces that display policy without
+  changing provenance or retraction semantics.
 - Codex and Claude skills record an operator ruling only as a dated quote of the
   operator's own words, never add conditions to it, record an agent's hold with its reason
   and end condition, and retract lines that no longer apply. On resume, operator rulings

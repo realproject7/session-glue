@@ -47,18 +47,25 @@ a reason or end condition, and a retraction of an unknown id, but still writes t
 handoff; `glue validate` gives the same warnings for the whole log. Neither changes the
 exit code, so a log with older unquoted `[standing]` lines keeps working.
 
-`glue status` and the resume prompt print the live marked lines in up to three blocks,
-in this order: `Standing operator rulings:` (quoted rulings only),
-`Agent-recorded holds (verify before relying on them):` and
-`Unverified standing notes (agent-written; confirm with the operator before relying on them):`.
-Each line shows its id, then the line without its leading `- `; `glue status` also
-shows its age. Each block is oldest first, capped at the newest 20, and led by a
-`(+N older lines in DECISIONS.md)` line when more exist. CLI 0.4.1 printed every
-`[standing]` line in one `standing:` block, and under `Standing operator rulings:` in the
-prompt, quoted or not. With that CLI, an older one, or on the fallback path, read
-`DECISIONS.md` after `LATEST.md` yourself: its last 20 lines plus every line containing
-`[standing]`, `[hold]` or `[retracts`, and apply the rules above. The file is
-append-only and grows, so do not read it whole by default.
+`glue status` prints all live quoted rulings and holds, oldest first, under
+`Standing operator rulings:` and `Agent-recorded holds (verify before relying on them):`.
+It groups only identical operator quote text with the same ruling date, shows a
+representative original line plus every source id, and applies retractions before
+grouping. No live ruling or hold is pushed out by a count limit.
+
+Default status summarizes `Unverified standing notes (agent-written; confirm with the operator before relying on them):`
+with their count and an instruction to use `glue status --repo-root . --full`.
+Full status shows every live original marked record, including duplicate provenance
+and unverified notes, without grouping or a newest-20 cap. The log stays append-only;
+no grouping retracts or rewrites anything. A relevant unverified note must be
+confirmed before relying on it; do not make unrelated old notes a universal gate.
+
+The resume prompt only points to LATEST and this live status lookup. It never
+embeds the decision history. CLI 0.4.1 and some later installations used capped
+blocks, including `(+N older lines in DECISIONS.md)`. Without the full-output option
+or CLI, read `DECISIONS.md` after `LATEST.md`: its last 20 lines plus every line
+containing `[standing]`, `[hold]` or `[retracts`, and apply provenance and retractions
+yourself. The log grows, so do not read it whole by default.
 
 `supersedes` is an optional frontmatter scalar naming the prior `session_id` this handoff
 replaces; when a handoff continues or replaces an earlier session, record it (when present
@@ -169,6 +176,16 @@ only — it never inspects or scores the prose beneath them.
 
 ### Compact continuity context
 
+Aim for a 4–6 KB current-state handoff, not a new copy of the session history.
+Keep each fact once across metadata and body; use brief entries under required
+headings and evidence references for completed tests and resolved failures. Preserve
+exact source identity, acceptance, authority and the next action even when longer.
+Do not add prior handoffs as default active context; recover a specific missing fact
+from an archive only when needed. Record only new durable decisions; repeated dated
+operator quotes already in the log need no new entry. `glue create` and `glue validate`
+warn above 6 KiB for LATEST or 1 KiB for the prompt. These are UTF-8 byte advisories,
+not token estimates or validation errors; nothing is truncated or refused for size.
+
 Use the existing body sections, not new schema fields. In Current State and
 Risks And Constraints, preserve the assigned role/owner, current acceptance,
 existing authorization, operator pauses and review/device/release gates. Record
@@ -202,27 +219,20 @@ Continue the previous coding session.
 Project root: /path/to/project
 First, read: .agent-history/LATEST.md
 Prompt artifact: .agent-history/RESUME_PROMPT.txt
+Then run in the project root: glue status --repo-root .
+Read current lifecycle and all live operator rulings and holds before acting.
 Then follow the Resume Prompt and continue from the first next_todo_items entry.
 
 First productive next action (next_todo_items[0]):
 <next_todo_items[0]>
 
-Standing operator rulings:
-<id> <each live quoted [standing] line without its leading "- ", newest 20, oldest first>
-
-Agent-recorded holds (verify before relying on them):
-<id> <each live [hold] line, the same way>
-
-Unverified standing notes (agent-written; confirm with the operator before relying on them):
-<id> <each other live [standing] line, the same way>
-
 Before editing, run git status --short and report any drift from the handoff.
 Do not scan the whole repository unless the handoff is stale or insufficient.
 ```
 
-Omit a block and its blank line when it has no live line (a retracted line is not
-live), and omit all three when `DECISIONS.md` is absent. When a block has more than
-20 lines, put `(+N older lines in DECISIONS.md)` first in it.
+Read the live decision view even when the prompt contains no marked lines. Existing
+prompts with embedded decisions remain readable, but their copies can be stale;
+reconcile with current lifecycle, decision provenance and retractions before acting.
 
 After writing the files, print the exact prompt in a fenced code block.
 

@@ -59,18 +59,11 @@ def test_claude_skill_keeps_v1_constraints():
     assert "fenced" in SKILL and "code block" in SKILL
 
 
-def test_claude_skill_documents_explicit_vault_resume():
-    """Issue #81: the packaged Claude asset must carry the same rule as Codex.
-
-    The protocol byte-identity guard covers ``references/protocol.md`` only; the
-    two ``SKILL.md`` files legitimately differ (the Claude invocation note), so
-    this content is asserted separately rather than by comparison.
-    """
+def test_claude_skill_routes_vault_details_without_relaxing_opt_in():
     assert "The default is local. Never sync on your own initiative." in FLAT_SKILL
-    assert "glue sync pull --repo-root . --project-id <id> --vault-dir <path>" in FLAT_SKILL
-    assert "glue sync pull --repo-root . --project-id <id> --vault-git-dir <path>" in FLAT_SKILL
-    assert "do not authenticate or handle a" in FLAT_SKILL
-    assert "vault not fully available" in FLAT_SKILL
+    assert "the command, the vault path, and the project ID" in FLAT_SKILL
+    assert "Read the Personal Vault section" in FLAT_SKILL
+    assert "Do not create a vault, authenticate or handle credentials, retry" in FLAT_SKILL
 
 
 def test_claude_skill_carries_and_reads_standing_decisions():
@@ -96,10 +89,8 @@ def test_claude_skill_carries_and_reads_standing_decisions():
     # The labels the skill names are the ones the CLI prints.
     for label in (schema.RULINGS_LABEL, schema.HOLDS_LABEL, schema.UNVERIFIED_LABEL):
         assert f"`{label}`" in FLAT_SKILL, label
-    assert (
-        "read the last 20 lines of `DECISIONS.md` plus every line containing `[standing]`, "
-        "`[hold]` or `[retracts` yourself"
-    ) in FLAT_SKILL
+    assert "glue status --repo-root . --full" in FLAT_SKILL
+    assert "reference's manual decision lookup" in FLAT_SKILL
     assert "Operator rulings stand as quoted until the operator changes them" in FLAT_SKILL
     assert "A hold expires when its end condition is met" in FLAT_SKILL
     assert "A resume must not narrow what the operator granted" in FLAT_SKILL
